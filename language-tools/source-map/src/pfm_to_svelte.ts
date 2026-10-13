@@ -34,6 +34,10 @@ export { template_value_at, yaml_keys } from './keys';
 
 /** A <style> block found in the PFM source, with positions in both source and generated output. */
 export interface StyleBlock {
+	/** Byte offset of the CSS tag start in the PFM source.  */
+	tagStart: number;
+	/** Byte offset of the CSS tag end in the PFM source.  */
+	tagEnd: number;
 	/** Byte offset of the CSS content start in the PFM source. */
 	sourceStart: number;
 	/** Byte offset of the CSS content end in the PFM source. */
@@ -144,7 +148,12 @@ function mapping(
 interface Regions {
 	frontmatter: { start: number; end: number } | null;
 	excluded: ExcludedRegion[];
-	styles: { valueStart: number; valueEnd: number }[];
+	styles: {
+		nodeStart: number;
+		nodeEnd: number;
+		valueStart: number;
+		valueEnd: number;
+	}[];
 }
 
 /** the regions of root nodes the markdown and css codes need */
@@ -167,6 +176,8 @@ function classify(source: string): Regions {
 			// compile hoists these into the instance script
 		} else if (tag === 'style') {
 			regions.styles.push({
+				nodeStart: cursor.start,
+				nodeEnd: cursor.end,
 				valueStart: cursor.value_start,
 				valueEnd: cursor.value_end,
 			});
@@ -861,6 +872,8 @@ export function pfmToSvelte(
 		const at = code.indexOf(css);
 		if (at !== -1) {
 			styleBlocks.push({
+				tagStart: sp.nodeStart,
+				tagEnd: sp.nodeEnd,
 				sourceStart: sp.valueStart,
 				sourceEnd: sp.valueEnd,
 				generatedStart: at,

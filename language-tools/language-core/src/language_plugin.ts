@@ -157,16 +157,10 @@ function create_virtual_code_from_source(
 	script_id: string,
 	options: PfmToSvelteOptions
 ): PfmVirtualCode {
-	let svelte;
+	let svelte, tsx;
 	try {
 		// Step 1: PFM to Svelte
 		svelte = pfmToSvelte(source, options);
-	} catch {
-		return create_fallback_virtual_code(source);
-	}
-
-	let tsx;
-	try {
 		// Step 2: Svelte to TypeScript via svelte2tsx
 		tsx = svelte_2_tsx(svelte.code, {
 			filename: script_id.replace(/\.[^./\\]+$/, '.svelte'),
@@ -343,10 +337,12 @@ function create_virtual_code_from_source(
 
 	for (let i = 0; i < svelte.styleBlocks.length; i++) {
 		const sb = svelte.styleBlocks[i];
+		const startTag = source.slice(sb.tagStart, sb.sourceStart);
+		const lang = /lang="(?<lang>.*)"/g.exec(startTag)?.[1] ?? 'css';
 		const css_text = source.slice(sb.sourceStart, sb.sourceEnd);
 		embedded_codes.push({
 			id: 'style_' + i,
-			languageId: 'css',
+			languageId: lang,
 			snapshot: create_snapshot(css_text),
 			mappings: [
 				{
@@ -463,7 +459,7 @@ function hash_string(s: string): number {
  *
  * Usage:
  *   const plugin = createPfmLanguagePlugin();
- *   // Pass to @volar/language-server or @volar/kit
+ *   // Pass to \@volar/language-server or \@volar/kit
  */
 export function create_pfm_language_plugin(
 	plugin_options: PfmLanguagePluginOptions = {}
