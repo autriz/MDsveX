@@ -1,5 +1,16 @@
 # @mdsvex/language-server
 
+## 0.1.0-next.2
+
+### Patch Changes
+
+- [#1140](https://github.com/pngwn/MDsveX/pull/1140) [`1cb7ec9`](https://github.com/pngwn/MDsveX/commit/1cb7ec95e846f268693dee42dc8ab4ea013de368) Thanks [@pngwn](https://github.com/pngwn)! - The `pfm-language-server` command starts. It failed as soon as it was run, with `require is not defined in ES module scope`, so an editor other than VS Code could not start the server from the package.
+
+- [#1140](https://github.com/pngwn/MDsveX/pull/1140) [`1cb7ec9`](https://github.com/pngwn/MDsveX/commit/1cb7ec95e846f268693dee42dc8ab4ea013de368) Thanks [@pngwn](https://github.com/pngwn)! - The packages hold only what they run. Tests, fixtures, build config and intermediate build output are no longer published, which takes `@mdsvex/parse` from 2,337 files to 28.
+
+- Updated dependencies [[`6c5901c`](https://github.com/pngwn/MDsveX/commit/6c5901c1eb87d10a2f43c835a10930a9dd5c0d27), [`edaaa59`](https://github.com/pngwn/MDsveX/commit/edaaa59bda7e388248428eb7b6459442c7ddd216), [`6b67a44`](https://github.com/pngwn/MDsveX/commit/6b67a4478687548dc1176fe659f8c917828c67c5), [`7dfb9c9`](https://github.com/pngwn/MDsveX/commit/7dfb9c9c7301e96e4780c03ff45b04dbee6e92c4), [`636d9b9`](https://github.com/pngwn/MDsveX/commit/636d9b9c065a29007e9581151be1f6c061f256e4), [`50e0b8c`](https://github.com/pngwn/MDsveX/commit/50e0b8ccc97885e0ca7eed53c075bfaed7969b23), [`1cb7ec9`](https://github.com/pngwn/MDsveX/commit/1cb7ec95e846f268693dee42dc8ab4ea013de368), [`a3b2de5`](https://github.com/pngwn/MDsveX/commit/a3b2de5e01e4e8cb2f56bf06ad6a163c035e980b), [`3ca3b52`](https://github.com/pngwn/MDsveX/commit/3ca3b525050c5874ac9ff7130033fe00d0112cba)]:
+  - @mdsvex/language-core@0.1.0-next.2
+
 ## 0.1.0-next.1
 
 ### Minor Changes
