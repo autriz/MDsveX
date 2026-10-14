@@ -112,7 +112,6 @@
 	"dependencies": {
 		"@mdsvex/typescript-plugin": "workspace:*",
 		"@volar/vscode": "^2.4.28",
-		"@volar/language-server": "^2.4.28",
 		"vscode-languageclient": "^9.0.1"
 	},
 	"devDependencies": {
