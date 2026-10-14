@@ -165,6 +165,9 @@ importers:
       '@mdsvex/typescript-plugin':
         specifier: workspace:*
         version: link:../typescript-plugin
+      '@volar/language-server':
+        specifier: ^2.4.28
+        version: 2.4.28
       '@volar/vscode':
         specifier: ^2.4.28
         version: 2.4.28
