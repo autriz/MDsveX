@@ -2,21 +2,22 @@
  * PFM VS Code Extension.
  */
 
-import * as path from "path";
-import * as vscode from "vscode";
-import { getTsdk } from "@volar/vscode";
+import * as path from 'path';
+import * as vscode from 'vscode';
+import { createLabsInfo, getTsdk } from '@volar/vscode';
+import protocol from '@volar/language-server/protocol';
 import {
 	LanguageClient,
 	type LanguageClientOptions,
 	type ServerOptions,
 	TransportKind,
-} from "vscode-languageclient/node";
+} from 'vscode-languageclient/node';
 
 let client: LanguageClient | undefined;
 
 export async function activate(context: vscode.ExtensionContext) {
 	const serverModule = context.asAbsolutePath(
-		path.join("server", "server.cjs"),
+		path.join('server', 'server.cjs')
 	);
 
 	const serverOptions: ServerOptions = {
@@ -27,16 +28,16 @@ export async function activate(context: vscode.ExtensionContext) {
 		debug: {
 			module: serverModule,
 			transport: TransportKind.ipc,
-			options: { execArgv: ["--nolazy", "--inspect=6009"] },
+			options: { execArgv: ['--nolazy', '--inspect=6009'] },
 		},
 	};
 
 	const tsdk = await getTsdk(context);
 
 	const clientOptions: LanguageClientOptions = {
-		documentSelector: [{ language: "pfm" }],
+		documentSelector: [{ language: 'pfm' }],
 		synchronize: {
-			fileEvents: vscode.workspace.createFileSystemWatcher("**/*.{pfm,svx}"),
+			fileEvents: vscode.workspace.createFileSystemWatcher('**/*.{pfm,svx}'),
 		},
 		initializationOptions: {
 			typescript: {
@@ -46,13 +47,24 @@ export async function activate(context: vscode.ExtensionContext) {
 	};
 
 	client = new LanguageClient(
-		"pfm",
-		"PFM Language Server",
+		'pfm',
+		'PFM Language Server',
 		serverOptions,
-		clientOptions,
+		clientOptions
 	);
 
-	await client.start();
+	let labsInfo;
+
+	try {
+		await client.start();
+
+		labsInfo = createLabsInfo(protocol);
+		labsInfo.addLanguageClient(client);
+	} catch (err) {
+		console.error(err);
+	}
+
+	return labsInfo?.extensionExports;
 }
 
 export function deactivate(): Thenable<void> | undefined {
