@@ -178,14 +178,19 @@ describe('footnotes', () => {
 		expect(session.compile('x\n').code).toBe('<p>x</p>');
 	});
 
-	test('a heading whose slug is a footnote id moves aside', () => {
+	test('a footnote whose id a heading was given moves aside', () => {
+		// a heading takes its id as it closes, the footnotes are numbered at the end
 		const code = compile_all('# fn 1\n\n## fnref 1\n\nx[^1]\n\n[^1]: y\n', {
 			heading_ids: true,
 		});
-		expect(code).toContain('<h1 id="fn-1-1">fn 1</h1>');
-		expect(code).toContain('<h2 id="fnref-1-1">fnref 1</h2>');
-		expect(code).toContain('<li id="fn-1">');
-		expect(code).toContain('id="fnref-1" role="doc-noteref"');
+		expect(code).toContain('<h1 id="fn-1">fn 1</h1>');
+		expect(code).toContain('<h2 id="fnref-1">fnref 1</h2>');
+		expect(code).toContain('<li id="fn-1-1">');
+		expect(code).toContain('href="#fn-1-1" id="fnref-1-1" role="doc-noteref"');
+		expect(code).toContain('href="#fnref-1-1" role="doc-backlink"');
+		expect(compile_all('# fn 1\n\nx[^1]\n\n[^1]: y\n')).toContain(
+			'<li id="fn-1">'
+		);
 	});
 
 	test('a table cell, a heading and a link hold a reference', () => {
@@ -282,6 +287,28 @@ describe('footnote errors', () => {
 		]);
 	});
 
+	test('a definition with no text is a FootnoteError at the definition', () => {
+		for (const raw of ['a[^1]\n\n[^1]:\n', 'a[^1]\n\n[^1]:\nnot indented\n']) {
+			const e = caught(raw, { filename: 'doc.svx' });
+			expect(e.code).toBe('footnote_empty');
+			expect([e.line, e.column]).toEqual([3, 1]);
+			expect(e.message).toBe(
+				'the footnote [^1] has no text, write it after `[^1]:` or on the lines below indented by four spaces (doc.svx:3)'
+			);
+		}
+	});
+
+	test('strict false renders a definition with no text, with a warning', () => {
+		const out = compile('a[^1]\n\n[^1]:\nnot indented\n', {
+			footnotes: { strict: false },
+		});
+		expect(out.code).toBe(
+			`<p>a${ref(1, '1')}</p><p>not indented</p>` +
+				section(`<li id="fn-1"> ${back(1).trim()}</li>`)
+		);
+		expect(codes(out.warnings)).toEqual([['footnote_empty', 3, 0]]);
+	});
+
 	test('an option of the wrong type throws before any document', () => {
 		expect(() => compile('a', { footnotes: 'x' as never })).toThrow(
 			/footnotes must be an object/
@@ -317,6 +344,23 @@ describe('a footnote that holds blocks', () => {
 	});
 });
 
+describe('a footnote with its text on the next line, as prettier writes it', () => {
+	test.each([
+		[
+			'lines that go on',
+			'a[^1]\n\n[^1]:\n    To add line breaks.\n    This is a second line.\n',
+			'a[^1]\n\n[^1]: To add line breaks.\n    This is a second line.\n',
+		],
+		[
+			'blocks',
+			'a[^1]\n\n[^1]:\n    one\n\n    - two\n\n    ```js\n    let b;\n    ```\n\nafter\n',
+			'a[^1]\n\n[^1]: one\n\n    - two\n\n    ```js\n    let b;\n    ```\n\nafter\n',
+		],
+	])('renders as written on one line, %s', (_, prettier, typed) => {
+		expect(compile_all(prettier)).toBe(compile_all(typed));
+	});
+});
+
 describe('footnote replacements', () => {
 	const components = [
 		{ specifier: 'mdsvex:components', names: ['footnote', 'footnotes', 'p'] },
@@ -336,6 +380,19 @@ describe('footnote replacements', () => {
 		expect(
 			compile('a[^n]\n\n[^n]: *one*\n', { components, sourcemap: true }).code
 		).toBe(out.code);
+	});
+
+	test('footnote gets the ids a footnote moved to', () => {
+		const raw = '# fn n\n\na[^n]\n\n[^n]: one\n';
+		for (const sourcemap of [false, true]) {
+			const code = compile(raw, {
+				components,
+				heading_ids: true,
+				sourcemap,
+			}).code;
+			expect(code).toContain('href={"#fn-n-1"} id={"fnref-1"}>');
+			expect(code).toContain('<li id="fn-n-1">');
+		}
 	});
 
 	test('a document with no footnote imports neither', () => {

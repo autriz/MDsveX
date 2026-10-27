@@ -1,6 +1,7 @@
 // browsers bundle this entry whole, so it never imports vite, the lexer or node builtins
 
 import {
+	DirectiveOwnerError,
 	PFMParser,
 	PluginCache,
 	PluginDispatcher,
@@ -35,38 +36,39 @@ import {
 	key_line,
 	metadata_export,
 	parse_frontmatter,
-} from './frontmatter';
-import type { FrontmatterOptions } from './frontmatter';
-import { PLUGIN_DATA_EXPORT, plugin_data_export } from './plugin_data';
-import type { PluginData } from './plugin_data';
-import { scope_of } from './root_scope';
-import { highlight_run, plain_run } from './highlight_run';
-export { highlight_error_at, MathError } from './highlight_run';
+} from './frontmatter.js';
+import type { FrontmatterOptions } from './frontmatter.js';
+import { PLUGIN_DATA_EXPORT, plugin_data_export } from './plugin_data.js';
+import type { PluginData, PluginDataContext } from './plugin_data.js';
+import { scope_of } from './root_scope.js';
+import { highlight_run, plain_run } from './highlight_run.js';
+export { highlight_error_at, MathError } from './highlight_run.js';
 import type {
 	HighlightOption,
 	HighlightRun,
 	HighlightWarning,
 	MathOption,
 	MathRenderer,
-} from './highlight_run';
-import { assign_heading_ids, slug_of } from './heading_ids';
-import { footnotes_of } from './footnotes';
-import type { FootnoteOptions, Footnotes } from './footnotes';
-import type { HeadingOptions, HeadingSlug } from './heading_ids';
-import { smart_of } from './smart_punctuation';
-import type { SmartOptions, SmartPunctuation } from './smart_punctuation';
-import { image_imports } from './image_imports';
-import type { ImageImports, ImageNeed } from './image_imports';
-import { link_urls, links_of, with_images } from './link_urls';
-import type { LinkOptions, Links, Rewrite } from './link_urls';
+} from './highlight_run.js';
+import { make_heading_ids, slug_of } from './heading_ids.js';
+import { footnotes_of } from './footnotes.js';
+import type { FootnoteOptions, Footnotes } from './footnotes.js';
+import type { HeadingIds } from '@mdsvex/parse';
+import type { HeadingOptions, HeadingSlug } from './heading_ids.js';
+import { smart_of } from './smart_punctuation.js';
+import type { SmartOptions, SmartPunctuation } from './smart_punctuation.js';
+import { image_imports } from './image_imports.js';
+import type { ImageImports, ImageNeed } from './image_imports.js';
+import { link_urls, links_of, with_images } from './link_urls.js';
+import type { LinkOptions, Links, Rewrite } from './link_urls.js';
 import {
 	fence_sources,
 	pre_error,
 	source_fences,
 	sources_met,
-} from './fence_sources';
-import type { Fenced, SourceFences, SourceNeed } from './fence_sources';
-import type { Snippet, SnippetsOption } from './run_blocks';
+} from './fence_sources.js';
+import type { Fenced, SourceFences, SourceNeed } from './fence_sources.js';
+import type { Snippet, SnippetsOption } from './run_blocks.js';
 
 export type {
 	DataChange,
@@ -91,12 +93,16 @@ export type TextRun = Parameters<NonNullable<ParsePlugin['text']>>[0];
 export type { Mapping, MappingData, SourceMapV3, MapTrace };
 export type { ComponentSource };
 export type { FrontmatterOptions };
-export { FrontmatterError } from './frontmatter';
-export { PluginDataError } from './plugin_data';
-export { PluginAsyncError, PluginTaskError } from '@mdsvex/parse';
-export { fence_meta } from './code_meta';
-export type { FenceMeta, MetaInfo } from './code_meta';
-export type { PluginData };
+export { FrontmatterError } from './frontmatter.js';
+export { PluginDataError } from './plugin_data.js';
+export {
+	DirectiveOwnerError,
+	PluginAsyncError,
+	PluginTaskError,
+} from '@mdsvex/parse';
+export { fence_meta } from './code_meta.js';
+export type { FenceMeta, MetaInfo } from './code_meta.js';
+export type { PluginData, PluginDataContext };
 export { DirectiveError } from '@mdsvex/render/html-cursor';
 export type {
 	CodeInfo,
@@ -107,36 +113,41 @@ export type {
 	MathInfo,
 	MathOption,
 	MathRenderer,
-} from './highlight_run';
-export { heading_slug } from './heading_ids';
-export type { ImageNeed } from './image_imports';
-export { SourceError } from './fence_sources';
-export { FootnoteError } from './footnotes';
+} from './highlight_run.js';
+export {
+	HeadingIdError,
+	heading_slug,
+	make_heading_ids,
+} from './heading_ids.js';
+export type { ImageNeed } from './image_imports.js';
+export { SourceError } from './fence_sources.js';
+export { FootnoteError } from './footnotes.js';
 export type {
 	FootnoteErrorCode,
 	FootnoteOptions,
 	FootnoteProblemAt,
-} from './footnotes';
-export type { SourceErrorCode, SourceNeed } from './fence_sources';
-export { RunError } from './run_blocks';
-export type { RunErrorCode, Snippet, SnippetsOption } from './run_blocks';
+} from './footnotes.js';
+export type { SourceErrorCode, SourceNeed } from './fence_sources.js';
+export { RunError } from './run_blocks.js';
+export type { RunErrorCode, Snippet, SnippetsOption } from './run_blocks.js';
 export type {
 	BaseImport,
 	LinkOptions,
 	Rewrite,
 	RewriteContext,
-} from './link_urls';
+} from './link_urls.js';
 export type {
+	HeadingIdErrorCode,
 	HeadingIdsOptions,
 	HeadingInfo,
 	HeadingOptions,
 	HeadingSlug,
-} from './heading_ids';
+} from './heading_ids.js';
 export type {
 	SmartOptions,
 	SmartPunctuation,
 	SmartPunctuationOptions,
-} from './smart_punctuation';
+} from './smart_punctuation.js';
 
 /**
  * which elements a replacement takes, markdown takes those from markdown
@@ -698,6 +709,8 @@ class Merge<T> {
 interface Unpacked {
 	/** the directives of each bundle with its name, undefined when none binds a handler */
 	handlers: BoundTables | undefined;
+	/** the tables even when none binds a handler, the error of an observer names owners from them */
+	owners: BoundTables | undefined;
 	/** the directive components of each bundle that has any */
 	directives: Merge<ComponentSource>;
 	components: Merge<ComponentSource>;
@@ -737,6 +750,7 @@ function unpack(bundles: Bundle[]): Unpacked {
 	const directives: ComponentSource[] = [];
 	const components: ComponentSource[] = [];
 	const parse: ParsePlugin[] = [];
+	const owners = new Map<string, string>();
 	for (let i = 0; i < bundles.length; i++) {
 		const bundle = bundles[i];
 		if (!is_record(bundle))
@@ -755,6 +769,10 @@ function unpack(bundles: Bundle[]): Unpacked {
 			for (const name of names) {
 				if (!is_record(own[name]))
 					throw bundle_error(i, bundle, `directives.${name} must be an object`);
+				const owner = owners.get(name);
+				if (owner !== undefined)
+					throw new DirectiveOwnerError(name, [owner, bundle.name]);
+				owners.set(name, bundle.name);
 			}
 			if (names.length !== 0) {
 				if (typeof bundle.module !== 'string' || bundle.module === '')
@@ -796,6 +814,7 @@ function unpack(bundles: Bundle[]): Unpacked {
 	}
 	const out: Unpacked = {
 		handlers: has_directive_handlers(tables) ? tables : undefined,
+		owners: tables.length === 0 ? undefined : tables,
 		directives: new Merge(directives),
 		components: new Merge(components),
 		parse: new Merge(parse),
@@ -818,10 +837,13 @@ function unbundled(inputs: CompileInputs): CompileInputs {
 	// assigned over a fresh one so the shape holds and a new field comes along
 	const out = Object.assign(compile_inputs(), inputs);
 	out.plugins = undefined;
-	out.directive_handlers = u.handlers;
 	out.directives = u.directives.with(inputs.directives);
 	out.components = u.components.with(inputs.components);
-	out.parse_plugins = u.parse.with(inputs.parse_plugins);
+	const parse = (out.parse_plugins = u.parse.with(inputs.parse_plugins));
+	// parse plugins build a dispatcher anyway, an observer among them names owners from these
+	out.directive_handlers =
+		u.handlers ??
+		(parse === undefined || parse.length === 0 ? undefined : u.owners);
 	return out;
 }
 
@@ -1088,6 +1110,17 @@ function prepare(
 
 // null while taken, so a compile inside a plugin makes its own
 let spare_parser: PFMParser | null = null;
+/** the footnote ids the heading ids of the last parse with them moved, see HeadingIds.moved */
+let moved_ids: Map<string, string> | null = null;
+
+function take_moved(): Map<string, string> | null {
+	const moved = moved_ids;
+	moved_ids = null;
+	return moved;
+}
+
+/** heading ids a one shot parse lends out, a compile a plugin handler starts finds none and makes its own */
+let spare_ids: HeadingIds | null = null;
 let spare_renderer: CursorHTMLRenderer | null = null;
 
 function take_renderer(): CursorHTMLRenderer {
@@ -1189,6 +1222,8 @@ class PluginHost {
 		const wrapper = renderer.template;
 		try {
 			this.exported = plugin_data_export(data);
+			// what a component reads the data from, as Node.svelte gives it while streaming
+			add_lines(renderer, DATA_CONTEXT);
 			if (wrapper === undefined) return;
 			if (metadata !== undefined && has_own.call(metadata, PLUGIN_DATA_EXPORT))
 				throw frontmatter_error(
@@ -1224,10 +1259,12 @@ class PluginHost {
 	}
 
 	/** a document that waits for its render, the dispatcher holds what they left until then */
-	wait(parsed: Parsed): void {
+	wait(parsed: Parsed, inputs: CompileInputs): void {
 		parsed._host = this;
 		parsed.data = this.dispatcher.data();
 		parsed.dependencies = this.dispatcher.dependencies();
+		// what settle applies can add images and fences, they are looked for again
+		if (this.pending !== null) parsed._scan = scan_of(inputs);
 	}
 
 	/**
@@ -1263,6 +1300,23 @@ class PluginHost {
 		result.warnings =
 			rendered === undefined ? warnings : warnings.concat(rendered);
 	}
+}
+
+function need_images(parsed: Parsed, images: ImageImports | null): void {
+	if (images === null) return;
+	parsed._images = images;
+	parsed.needs = images.needs;
+}
+
+function need_sources(parsed: Parsed, shown: SourceFences | null): void {
+	if (shown === null) return;
+	parsed._sources = shown;
+	if (shown.math) parsed.math = true;
+	if (shown.snippets !== null) parsed.snippets = shown.snippets;
+	// a document that only runs blocks asks for nothing
+	if (shown.needs.length === 0) return;
+	const needs = parsed.needs;
+	parsed.needs = needs === undefined ? shown.needs : [...needs, ...shown.needs];
 }
 
 /** a Parsed whose plugins deferred work renders once it settled */
@@ -1313,6 +1367,8 @@ function parse_once(
 		host.tree = tree;
 		host.start(source, inputs, awaits);
 	}
+	const slug = inputs.heading_ids;
+	const headings = slug === undefined ? null : lend_ids(tree, slug, source);
 	let parser = spare_parser;
 	if (parser === null) parser = new PFMParser(tree);
 	else {
@@ -1326,15 +1382,55 @@ function parse_once(
 	spare_parser = parser;
 
 	const nodes = tree.get_buffer();
-	// fused plugins set their ids before this, sequential ones read them after
-	const slug = inputs.heading_ids;
-	if (slug !== undefined) assign_heading_ids(nodes, source, slug);
+	// sequential plugins read the ids, every heading has its own by now
+	if (headings !== null) {
+		headings.finish(nodes);
+		moved_ids = headings.moved;
+		spare_ids = headings;
+	}
 	if (host !== null) {
 		host.dispatcher.run_sequential(nodes);
 		host.finish(nodes);
 	}
 	nodes.trim();
 	return nodes;
+}
+
+/** the spare heading ids for a one shot parse, given back after it, a throw drops them */
+function lend_ids(
+	tree: TreeBuilder,
+	slug: HeadingSlug,
+	source: string
+): HeadingIds {
+	let headings = spare_ids;
+	if (headings === null || headings.slug !== slug)
+		headings = make_heading_ids(slug);
+	else spare_ids = null;
+	tree.set_headings(headings);
+	headings.start(source);
+	return headings;
+}
+
+/**
+ * heading ids for a kept builder, kept by it from one document to the next
+ * while the slug is the same, null and none on the builder without the option
+ */
+function ids_for(
+	tree: TreeBuilder,
+	slug: HeadingSlug | undefined,
+	source: string
+): HeadingIds | null {
+	if (slug === undefined) {
+		tree.set_headings(null);
+		return null;
+	}
+	let headings = tree.get_headings();
+	if (headings === null || headings.slug !== slug) {
+		headings = make_heading_ids(slug);
+		tree.set_headings(headings);
+	}
+	headings.start(source);
+	return headings;
 }
 
 // must equal NONE in @mdsvex/parse
@@ -1527,7 +1623,13 @@ function render_once(raw: string, options?: CompileOptions): CompileResult {
 	const spans = take_math();
 	// only a document the parser noted a footnote in is looked through
 	const notes = take_footnote()
-		? footnotes_of(nodes, source, inputs.footnotes, inputs.filename)
+		? footnotes_of(
+				nodes,
+				source,
+				inputs.footnotes,
+				inputs.filename,
+				inputs.heading_ids === undefined ? null : take_moved()
+			)
 		: null;
 	// a handler that read the frontmatter already parsed it
 	const metadata =
@@ -1597,7 +1699,7 @@ function render_once(raw: string, options?: CompileOptions): CompileResult {
 	}
 	// give_renderer clears these, a throw drops the renderer
 	if (images !== null) {
-		renderer.imports = images.lines;
+		add_lines(renderer, images.lines);
 		renderer.urls = images.lookup;
 	}
 	if (fenced !== null) {
@@ -1687,12 +1789,28 @@ function give_fences(
 	if (fenced.runs !== -1 && renderer.scope?.get('pre') === undefined)
 		throw pre_error(filename, source, fenced.runs);
 	renderer.fences = fenced.fences;
-	const lines = fenced.lines;
+	add_lines(renderer, fenced.lines);
+}
+
+/** lines for the instance script of the next render, after those it has */
+function add_lines(
+	renderer: CursorHTMLRenderer,
+	lines: readonly string[] | undefined
+): void {
 	if (lines === undefined) return;
 	const before = renderer.imports;
 	renderer.imports =
 		before === undefined || before.length === 0 ? lines : before.concat(lines);
 }
+
+/**
+ * a document with plugin data gives it to its components in the context, under
+ * the key @mdsvex/render/stream reads, current is the data and never changes
+ */
+const DATA_CONTEXT: readonly string[] = [
+	"import { setContext as set_context_MDSVEX } from 'svelte';",
+	`set_context_MDSVEX(Symbol.for('mdsvex.plugin_data'), { current: ${PLUGIN_DATA_EXPORT} });`,
+];
 
 /** true when handlers of a plugin may run, which keeps a document off a shared session */
 function has_plugins(options: CompileOptions): boolean {
@@ -1744,9 +1862,12 @@ export class Parsed {
 	/**
 	 * what the document asks for before it renders, images and then sources,
 	 * each in document order, undefined for nothing, only what the inputs of
-	 * the parse turned on is looked for
+	 * the parse turned on is looked for, complete once settle resolved, as
+	 * what the plugins deferred can add an image or a src=
 	 */
 	needs: readonly Need[] | undefined = undefined;
+	/** @internal what settle looks for again once it applied, null when nothing waits */
+	_scan: Scan | null = null;
 	/** @internal the imports the needs of type image render with */
 	_images: ImageImports | null = null;
 	/** @internal the fences the needs of type source are for, and those that run */
@@ -1831,11 +1952,19 @@ export class CompilerSession {
 		else if (!this.released) tree.reset();
 		this.released = false;
 
+		const slug = inputs.heading_ids;
+		// one call that a document without the option never makes
+		const headings =
+			slug === undefined && tree.get_headings() === null
+				? null
+				: ids_for(tree, slug, source);
 		this.parser!.set_options(inputs);
 		this.parser!.parse_normalized(source);
 		const nodes = tree.get_buffer();
-		const slug = inputs.heading_ids;
-		if (slug !== undefined) assign_heading_ids(nodes, source, slug);
+		if (headings !== null) {
+			headings.finish(nodes);
+			moved_ids = headings.moved;
+		}
 		return nodes;
 	}
 
@@ -1900,6 +2029,12 @@ export class CompilerSession {
 		}
 		arena.host.start(source, inputs, awaits);
 		arena.host.cache = this.cache;
+		const slug = inputs.heading_ids;
+		// one call that a document without the option never makes
+		const headings =
+			slug === undefined && arena.tree.get_headings() === null
+				? null
+				: ids_for(arena.tree, slug, source);
 
 		this.plugin_busy = true;
 		let done = false;
@@ -1907,8 +2042,10 @@ export class CompilerSession {
 			arena.parser.set_options(inputs);
 			arena.parser.parse_normalized(source);
 			const nodes = arena.tree.get_buffer();
-			const slug = inputs.heading_ids;
-			if (slug !== undefined) assign_heading_ids(nodes, source, slug);
+			if (headings !== null) {
+				headings.finish(nodes);
+				moved_ids = headings.moved;
+			}
 			arena.dispatcher.run_sequential(nodes);
 			arena.host.finish(nodes);
 			done = true;
@@ -2031,30 +2168,12 @@ export class CompilerSession {
 		const parsed = new Parsed(raw, source, metadata, nodes);
 		parsed.math = parsed._spans = this.spans;
 		parsed._notes = this.notes;
-		if (plugged) this.plugin_arena!.host.wait(parsed);
+		if (plugged) this.plugin_arena!.host.wait(parsed, inputs);
 		if (inputs.import_images === true)
-			this.need_images(parsed, image_imports(nodes, source));
+			need_images(parsed, image_imports(nodes, source));
 		if (inputs.sources !== false || inputs.snippets !== false)
-			this.need_sources(parsed, fences_of(nodes, source, inputs));
+			need_sources(parsed, fences_of(nodes, source, inputs));
 		return this.lend(parsed, plugged);
-	}
-
-	private need_images(parsed: Parsed, images: ImageImports | null): void {
-		if (images === null) return;
-		parsed._images = images;
-		parsed.needs = images.needs;
-	}
-
-	private need_sources(parsed: Parsed, shown: SourceFences | null): void {
-		if (shown === null) return;
-		parsed._sources = shown;
-		if (shown.math) parsed.math = true;
-		if (shown.snippets !== null) parsed.snippets = shown.snippets;
-		// a document that only runs blocks asks for nothing
-		if (shown.needs.length === 0) return;
-		const needs = parsed.needs;
-		parsed.needs =
-			needs === undefined ? shown.needs : [...needs, ...shown.needs];
 	}
 
 	/** the arena that holds the document goes to its Parsed, the next parse builds one or gets one back */
@@ -2333,7 +2452,13 @@ export class CompilerSession {
 			spans = this.spans = take_math();
 			// only a document the parser noted a footnote in is looked through
 			notes = this.notes = take_footnote()
-				? footnotes_of(nodes, source, inputs.footnotes, inputs.filename)
+				? footnotes_of(
+						nodes,
+						source,
+						inputs.footnotes,
+						inputs.filename,
+						inputs.heading_ids === undefined ? null : take_moved()
+					)
 				: null;
 			// the parser notes each image it makes, so only a document with one
 			// is walked, with plugins the walk decides, they make images unseen
@@ -2359,9 +2484,9 @@ export class CompilerSession {
 				const waiting = new Parsed(raw, source, metadata, nodes);
 				waiting.math = waiting._spans = spans;
 				waiting._notes = notes;
-				if (host !== null) host.wait(waiting);
-				this.need_images(waiting, images);
-				this.need_sources(waiting, shown);
+				if (host !== null) host.wait(waiting, inputs);
+				need_images(waiting, images);
+				need_sources(waiting, shown);
 				// parse_once made its own nodes, no arena of the session holds them
 				if (renderer === this.renderer) this.lend(waiting, plugged);
 				if (kind === Kind.PARSE) return waiting;
@@ -2441,7 +2566,7 @@ export class CompilerSession {
 			| CompileTraceResult
 			| TraceTarget;
 		if (swaps !== null) {
-			renderer.imports = swaps.lines;
+			add_lines(renderer, swaps.lines);
 			renderer.urls = swaps.lookup;
 		}
 		const smart = inputs.smart_punctuation;
@@ -2543,6 +2668,8 @@ export class CompilerSession {
 				renderer.fences = undefined;
 				renderer.imports = undefined;
 			}
+			// share gave the lines of the data context
+			if (host !== null) renderer.imports = undefined;
 			if (smart !== undefined) renderer.smart_punctuation = undefined;
 			if (notes !== null) renderer.footnotes = undefined;
 		}
@@ -2636,6 +2763,48 @@ async function settle_plugins(
 	host.pending = null;
 	parsed.data = host.dispatcher.data();
 	parsed.dependencies = host.dispatcher.dependencies();
+	rescan(parsed);
+}
+
+/** the inputs of a waiting parse, copied as a caller may change them before it settles */
+interface Scan {
+	images: boolean;
+	shows: boolean;
+	runs: boolean;
+	filename: string | undefined;
+}
+
+/** null when the parse looked for nothing settle could add */
+function scan_of(inputs: CompileInputs): Scan | null {
+	const images = inputs.import_images === true;
+	const shows = inputs.sources !== false;
+	const runs = inputs.snippets !== false;
+	if (!images && !shows && !runs) return null;
+	return { images, shows, runs, filename: inputs.filename };
+}
+
+/**
+ * the images and fences of a settled document, a task or a document hook
+ * may have added, changed or removed one, so its needs are made again whole
+ */
+function rescan(parsed: Parsed): void {
+	const scan = parsed._scan;
+	const nodes = parsed._nodes;
+	parsed._scan = null;
+	// dropped while it waited
+	if (scan === null || nodes === null) return;
+	const source = parsed.source;
+	parsed.needs = undefined;
+	parsed.snippets = undefined;
+	parsed.math = parsed._spans;
+	parsed._images = null;
+	parsed._sources = null;
+	if (scan.images) need_images(parsed, image_imports(nodes, source));
+	if (scan.shows || scan.runs)
+		need_sources(
+			parsed,
+			source_fences(nodes, source, scan.filename, scan.shows, scan.runs)
+		);
 }
 
 /**
@@ -2643,12 +2812,19 @@ async function settle_plugins(
  * result as compile once that work applied, a document whose plugins defer
  * nothing compiles as compile does, safe in a browser
  *
+ * session holds what ctx.cached loads, a host that watches passes its own and
+ * calls its invalidate when a dependency changes, without one the loads are
+ * kept for as long as the plugins array is
+ *
  * @example
  * const { code, data } = await compile_async(source, { plugins: [citations()] });
+ * session.invalidate(changed);
+ * await compile_async(source, options, session);
  */
 export async function compile_async(
 	source: string,
-	options?: CompileOptions
+	options?: CompileOptions,
+	session?: CompilerSession
 ): Promise<CompileResult> {
 	if (
 		options === undefined ||
@@ -2656,7 +2832,7 @@ export async function compile_async(
 			(options.read === undefined || options.resolve === undefined))
 	)
 		return render(source, options);
-	const session = async_session(options);
+	session ??= async_session(options);
 	const inputs = inputs_of(options);
 	const parsed = session.parse(source, inputs);
 	let read: string[] | undefined;

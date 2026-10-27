@@ -23,7 +23,10 @@ export interface FootnoteOptions {
 	strict?: boolean;
 }
 
-export type FootnoteErrorCode = 'footnote_undefined' | 'footnote_duplicate';
+export type FootnoteErrorCode =
+	| 'footnote_undefined'
+	| 'footnote_duplicate'
+	| 'footnote_empty';
 
 /** where a footnote problem is, line and column from 1 */
 export interface FootnoteProblemAt {
@@ -34,14 +37,14 @@ export interface FootnoteProblemAt {
 }
 
 /**
- * a footnote reference with no definition, or a second definition of a
- * label, the parser reads a reference by its syntax alone, so `[^abc]` in
- * prose is one and has to be escaped or put in code
+ * a footnote reference with no definition, a second definition of a label,
+ * or a definition with no text, the parser reads a reference by its syntax
+ * alone, so `[^abc]` in prose is one and has to be escaped or put in code
  */
 export class FootnoteError extends Error {
 	code: FootnoteErrorCode;
 	label: string;
-	/** 1 based line in the document, of the reference or of the second definition */
+	/** 1 based line in the document, of the reference or of the definition */
 	line: number;
 	/** 1 based column */
 	column: number;
@@ -79,6 +82,8 @@ function message_of(problem: FootnoteProblem): string {
 			return `the footnote reference ${written} has no definition, add \`${written}: text\`, or escape the bracket as \`\\${written}\` if it is not a footnote`;
 		case 'footnote_duplicate':
 			return `the footnote ${written} is defined twice, a label has one definition`;
+		case 'footnote_empty':
+			return `the footnote ${written} has no text, write it after \`${written}:\` or on the lines below indented by four spaces`;
 		default:
 			return `the footnote ${written} is never referenced, so it is not rendered`;
 	}
@@ -103,13 +108,14 @@ function position(
 
 /**
  * the footnotes of a parsed document, null for one with none
- * @throws FootnoteError for a reference with no definition and for a label defined twice, unless strict is false
+ * @throws FootnoteError for a reference with no definition, a label defined twice and a definition with no text, unless strict is false
  */
 export function footnotes_of(
 	nodes: NodeBuffer,
 	source: string,
 	options: FootnoteOptions | undefined,
-	filename: string | undefined
+	filename: string | undefined,
+	moved: Map<string, string> | null = null
 ): Footnotes | null {
 	const strict = options === undefined || options.strict !== false;
 	const index = footnote_index(nodes);
@@ -148,6 +154,8 @@ export function footnotes_of(
 			: footnote_index(nodes, true)!;
 	const out = numbered as Footnotes;
 	out.warnings = warnings;
+	// a heading was given the id of a footnote first
+	if (moved !== null) out.moved = moved;
 	if (options !== undefined) {
 		if (options.label !== undefined) out.label = options.label;
 		if (options.back_label !== undefined) out.back_label = options.back_label;

@@ -210,6 +210,19 @@ const { code, dependencies } = await compile_async(source, {
 });
 ```
 
+What plugins load with [`ctx.cached`](docs#loading-files) is kept between calls for as long as you pass the same `plugins` array, which suits a build that runs once. A host that compiles again when files change passes a `CompilerSession` of its own as the third argument, and calls its `invalidate` with the paths that changed before compiling the documents whose `dependencies` list them:
+
+```js
+import { CompilerSession, compile_async } from 'mdsvex/compile';
+
+const session = new CompilerSession();
+const { code, dependencies } = await compile_async(source, options, session);
+
+// later, when a watched file changes
+session.invalidate([changed]);
+await compile_async(source, options, session);
+```
+
 #### Compiling in steps
 
 A host that is not Vite, such as a playground or another bundler, compiles in steps so it can fetch what a document needs between them. This is what the Vite plugin does:
@@ -236,6 +249,7 @@ const { code, data } = session.render(parsed, inputs);
 
 - **`parse`** runs the parser and the plugins. The `Parsed` it returns holds the document, its `metadata`, the `data` its plugins wrote so far and `needs`.
 - **`settle`** waits for deferred work and applies it, and returns `undefined` when there was none, so a document without any stays synchronous. A document whose plugins deferred work throws if it renders before.
+- **Read `needs` after `settle`.** Deferred work and a `document` hook can add an image or a fence with `src=`, or change one, and `settle` makes `needs`, `snippets` and `math` again from the settled tree. Only what the inputs of the `parse` turned on is looked for.
 - **`render`** gives what `compile` gives. A `Parsed` renders once.
 - **The session compiles other documents while one waits.** Each `Parsed` holds its own document.
 - **`parsed.dependencies`**, and `dependencies` on the result, are the absolute paths its plugins read or named, for the host to watch. When one changes, call `session.invalidate([path])` before compiling the documents that depend on it again, so what `ctx.cached` kept from it goes.
@@ -587,6 +601,7 @@ Each handler gets the node and a context:
 - `ctx.directive` is the directive it is bound to.
 - `ctx.index` counts the calls of this handler in this directive, from 0.
 - `ctx.state` is an empty object, new for each directive in the document. Keep what a handler needs between calls there, such as the step it opened last.
+- `ctx.scratch` is the plugin's, one for the whole document and shared with its other handlers and its document hook, see [plugin handlers](docs#plugin-handlers).
 
 A handler can return a function, which runs when the node closes. The directive's own `parse` can read its args when it opens and write them when it closes:
 
@@ -612,8 +627,41 @@ Things to know:
 - **A nested blockquote or list is not a child.** `children` means written directly inside the directive. Use `descendants` for every node of a type at any depth.
 - **Only containers have children.** The bracket text of a leaf or inline directive is not passed to `children` or `descendants` handlers. Their own `parse` still runs, though an inline directive gets its args after it, so read them in the function `parse` returns.
 - **Your own export wins.** A `directives` export of the same name from a [`components` module](docs#declaring-directives) or a template replaces the plugin's component. The plugin's handlers still run, so your `step` gets the same `label` and `children`.
-- **A later plugin wins a name.** When two plugins have an entry for the same directive, the later one's component and handlers are used.
+- **A directive has one owner.** Two plugins with an entry for the same directive throw a `DirectiveOwnerError` when the config loads, naming both. Another plugin reads the directive by observing it, below.
 - **Other plugins still see the nodes.** A heading inside `:::steps` reaches the `heading` handlers of `parse_plugins` too, after the bound handler ran. A plugin's `parse` runs ahead of `parse_plugins`.
+
+A plugin that wants to read a directive another plugin owns observes it, with `observe` in its `parse`, or in an entry of `parse_plugins`. This numbers the figures of a figure plugin and leaves what it finds as [plugin data](docs#plugin-data), which the figure's component can read:
+
+```js
+export function numbering() {
+	return {
+		name: 'numbering',
+		parse: {
+			observe: {
+				figure: {
+					parse(figure, ctx) {
+						const number = (ctx.scratch.figures = (ctx.scratch.figures ?? 0) + 1);
+						const id = figure.attrs.args?.id;
+						if (id === undefined) return;
+						return () => {
+							const label = figure.first_child;
+							ctx.set('target:' + id, {
+								number,
+								caption: label?.type === 'directive_label' ? label.text_content : null
+							});
+						};
+					}
+				}
+			}
+		}
+	};
+}
+```
+
+- **It takes the same entries** as a plugin's own `directives`: `parse`, `children` and `descendants`, with a `ctx.state` and `ctx.index` of its own.
+- **It changes no node.** It writes data, warns, and reads the tree. Writing to a node, the directive or anything else, throws a `TypeError` that names the plugin that owns the directive.
+- **It runs after the owner,** at the open and at the close, so it sees the args and the children as the owner left them.
+- **It runs whoever renders the directive:** a plugin, your own component, or nothing yet.
 
 `compile()` takes `plugins` as well. It writes `module` as the import specifier exactly as given.
 
@@ -693,11 +741,12 @@ A new `html` node takes its element name as `tag`. This wraps each `##` heading 
 
 ```js
 const sections = {
+	name: 'sections',
 	heading: {
 		parse(node, ctx) {
 			if (node.depth !== 2 || node.parent?.type !== 'root') return;
-			ctx.section?.close();
-			ctx.section = node.wrap_from('html', { tag: 'section' });
+			ctx.scratch.section?.close();
+			ctx.scratch.section = node.wrap_from('html', { tag: 'section' });
 		}
 	}
 };
@@ -720,7 +769,13 @@ Second.
 <section><h2>Two</h2><p>Second.</p></section>
 ```
 
-The context is new for each document, and any key you set on it is yours, as `ctx.section` is above. It also has:
+The context is new for each document. What a plugin keeps between its handlers goes in `ctx.scratch`, as the open section does above:
+
+- **One object for each plugin name and document.** Every handler, close callback, deferred task and document hook of the plugin gets the same one, so the bound handlers of a plugin can leave something for its document hook. It needs a `name`.
+- **It is the plugin's own.** Anything can go in it, and it never reaches the page or `plugin_data`.
+- **The parser does not take it back.** When the parser takes a node back, what its handlers put in the scratch stays. Keep there what that can't make wrong, such as directives and headings, and write what must follow it with `ctx.set` and `ctx.add`.
+
+The context also has:
 
 | member | what it is |
 | --- | --- |
@@ -793,7 +848,8 @@ const titles = {
 
 - **The task gets a node and a `ctx` of its own** and changes the document through them. Its changes apply once it has finished and the parser is sure of the node. If the parser takes the node back, they are dropped.
 - **A task changes its own node** and what is inside it, and writes data for it. Anything else throws a `TypeError`. So the result does not depend on which task finishes first.
-- **The Vite plugin waits** for deferred work before it renders the document, and so does a `?data` import. With `compile`, use [`compile_async`](docs#compile_async). In dev it warns when a document has waited five seconds, naming the plugin.
+- **The Vite plugin waits** for deferred work before it renders the document, and so does a `?data` import. With `compile`, use [`compile_async`](docs#compile_async). In dev it warns when a document has waited five seconds, naming the plugin and the document.
+- **What a task adds compiles as if it were written.** An image whose `src` a task set is imported, and a fence it adds with `src=` shows its file, and the same goes for a `document` hook.
 
 Work that needs the whole document goes in a `document` hook. It runs once, after the parse and after every deferred task, and gets the root of the tree. It may be async:
 
@@ -1017,7 +1073,7 @@ Set `import_images: false` to leave every url as written:
 mdsvex({ import_images: false });
 ```
 
-`compile()` takes the option too. It is off there by default, because the import only means something to a bundler that takes image files. The editor compiles without it, so a replaced `img` always sees a string `src` there.
+`compile()` takes the option too. It is off there by default, because the import only means something to a bundler that takes image files. The editor reads the option from the manifest the plugin writes, or from `import_images` in an `mdsvex.config.json`, where it is on unless it is `false`. A replaced `img` then gets the type of the import as its `src`, as TypeScript resolves it: `vite/client` declares the common image types and `?url`, `?raw` and `?inline`, and `@sveltejs/enhanced-img` declares `?enhanced`. An import TypeScript can't resolve reports nothing, and its `src` is `any`.
 
 ### `links`
 
@@ -1151,7 +1207,9 @@ The id is the one GitHub makes: the text in lowercase, punctuation dropped, each
 
 The text is what a reader sees. Emphasis, links and code contribute their text without the markup, and an image contributes its alt text. What Svelte renders contributes nothing, because it isn't known until the page runs: an expression such as `{version}`, a component and a directive. A heading that is left with no text, such as `## {title}`, gets no `id`.
 
-A heading that already has an `id` keeps it, whether a [parse plugin](docs#parse_plugins) set it or you typed the heading as HTML, and no generated id repeats it. Headings typed as HTML are otherwise left alone.
+A heading that already has an `id` keeps it, whether a [parse plugin](docs#parse_plugins) set it or you typed the heading as HTML, and no id made after it repeats it. Headings typed as HTML are otherwise left alone.
+
+Each heading gets its id as it closes, from the ids before it, and an id never changes once given. An id you write yourself, on a heading typed as HTML or through a plugin that reads one from your text, is kept, and one that an element before it already has fails the compile with a `HeadingIdError` that names both. Footnotes are numbered at the end, so a footnote whose id a heading took moves aside instead: `## Fn 1` keeps `fn-1` and the footnote `[^1]` becomes `fn-1-1`.
 
 For another scheme, pass a `slug` function. It gets the text and the depth of the heading, and mdsvex numbers duplicates in what it returns. An empty string leaves the heading without an `id`. `heading_slug` is the default:
 
@@ -1165,14 +1223,15 @@ mdsvex({
 });
 ```
 
-The ids are set after the parse and before sequential parse plugins, so one can add an anchor that points at its heading:
+The id is there for the function a parse plugin returns from its handler, which runs when the heading closes, and for every sequential plugin, so one can add an anchor that points at its heading:
 
 ```js
 const anchors = {
-	sequential: true,
 	heading: {
 		parse(node) {
-			node.prepend('link', { href: `#${node.attrs.id}`, 'aria-hidden': 'true' });
+			return () => {
+				node.prepend('link', { href: `#${node.attrs.id}`, 'aria-hidden': 'true' });
+			};
 		}
 	}
 };
@@ -1182,7 +1241,7 @@ mdsvex({ heading_ids: true, parse_plugins: [anchors] });
 
 [`@mdsvex/plugin-anchors`](docs#anchors) is that plugin, with a choice of where the link goes.
 
-A [replacement](docs#custom-components) for a heading gets the `id` as a prop. `compile()` takes the option too. The ids belong to the compile, so `@mdsvex/parse` used on its own, for a streaming render, makes none. The editor reads the option from the manifest the plugin writes, or from `heading_ids: true` in an `mdsvex.config.json`, which can't hold a `slug` function.
+A [replacement](docs#custom-components) for a heading gets the `id` as a prop. `compile()` takes the option too. A streaming render makes the same ids as the heading arrives: `make_heading_ids()` from `mdsvex/compile`, given a `slug` or not, goes to the builder with `set_headings`. The editor reads the option from the manifest the plugin writes, or from `heading_ids: true` in an `mdsvex.config.json`, which can't hold a `slug` function.
 
 ### `smart_punctuation`
 
@@ -1779,11 +1838,11 @@ A directive with no component is an error that names it and its line and column:
 no component renders the directive :::Calout at 3:1. Export a component named "Calout" from a directives module (export * as directives from './directives.ts'), or replace the directive_container node in a parse plugin
 ```
 
-A [parse plugin](docs#parse_plugins) can handle directives that have no component, through the `directive_inline`, `directive_leaf` and `directive_container` node types. A directive with a component never reaches those handlers.
+A [parse plugin](docs#parse_plugins) can handle directives that have no component, through the `directive_inline`, `directive_leaf` and `directive_container` node types. A directive with a component never reaches those handlers, a plugin reads it by [observing it](docs#plugins).
 
 ### Directives from a plugin
 
-A [plugin](docs#plugins) can bring directives of its own, with the components that render them. They sit below everything above: an export of the same name from a `components` module or a template replaces the plugin's component. [`@mdsvex/plugin-steps`](docs#steps) is one.
+A [plugin](docs#plugins) can bring directives of its own, with the components that render them. They sit below everything above: an export of the same name from a `components` module or a template replaces the plugin's component. Two plugins can't both bring one. [`@mdsvex/plugin-steps`](docs#steps) is one.
 
 ## Plugins
 
@@ -1793,8 +1852,15 @@ The first-party plugins are packages of their own, named `@mdsvex/plugin-*`. Eac
 import { mdsvex } from 'mdsvex';
 import { anchors } from '@mdsvex/plugin-anchors';
 import { citations } from '@mdsvex/plugin-citations';
+import { code_blocks } from '@mdsvex/plugin-code-blocks';
+import { diagram } from '@mdsvex/plugin-diagram';
 import { emoji } from '@mdsvex/plugin-emoji';
 import { external_links } from '@mdsvex/plugin-external-links';
+import { elements } from '@mdsvex/plugin-elements';
+import { embeds } from '@mdsvex/plugin-embeds';
+import { figures } from '@mdsvex/plugin-figures';
+import { link_check } from '@mdsvex/plugin-link-check';
+import { numbering } from '@mdsvex/plugin-numbering';
 import { page_data } from '@mdsvex/plugin-page-data';
 import { references } from '@mdsvex/plugin-references';
 import { steps } from '@mdsvex/plugin-steps';
@@ -1806,13 +1872,20 @@ mdsvex({
 	plugins: [
 		steps(),
 		tabs(),
+		elements(),
+		embeds(),
+		figures(),
+		code_blocks(),
+		diagram(),
 		anchors(),
 		external_links(),
 		toc(),
 		page_data(),
 		references({ repo: 'you/site' }),
 		emoji(),
-		citations()
+		citations(),
+		numbering(),
+		link_check({ routes: 'src/routes' })
 	]
 });
 ```
@@ -1821,6 +1894,11 @@ mdsvex({
 | --- | --- |
 | [`@mdsvex/plugin-steps`](docs#steps) | numbered steps, one for each heading inside `:::steps` |
 | [`@mdsvex/plugin-tabs`](docs#tabs) | tabs and code groups, one tab for each heading or code fence inside `:::tabs` |
+| [`@mdsvex/plugin-elements`](docs#elements) | details, accordions, keys, ruby and badges, each a directive over an HTML element |
+| [`@mdsvex/plugin-embeds`](docs#embeds) | YouTube and Vimeo players named by their title |
+| [`@mdsvex/plugin-code-blocks`](docs#code-blocks) | a `pre` with a copy button, the title and the caption of the fence |
+| [`@mdsvex/plugin-diagram`](docs#diagrams) | `mermaid` fences drawn by pele at build time or by mermaid in the browser |
+| [`@mdsvex/plugin-figures`](docs#figures) | `:::figure[Caption]` around an image or anything else, numbered when a numbering plugin asks |
 | [`@mdsvex/plugin-anchors`](docs#anchors) | a link to itself on every heading that has an id |
 | [`@mdsvex/plugin-external-links`](docs#external-links) | `rel` and `target` on every link that leaves the site |
 | [`@mdsvex/plugin-toc`](docs#table-of-contents) | the headings of a document as data, and a `::toc` directive that lists them |
@@ -1828,6 +1906,8 @@ mdsvex({
 | [`@mdsvex/plugin-emoji`](docs#emoji) | emoji shortcodes, `:tada:` becomes the emoji, with an optional label for screen readers |
 | [`@mdsvex/plugin-references`](docs#references) | links for `@user`, `#123`, `owner/repo#123` and commits, and for bare urls when asked |
 | [`@mdsvex/plugin-citations`](docs#citations) | `:cite[key]` from a CSL JSON bibliography, and a `::bibliography` that lists what a document cites |
+| [`@mdsvex/plugin-link-check`](docs#link-check) | a warning at every link to an id or a document that is not there |
+| [`@mdsvex/plugin-numbering`](docs#numbering) | numbered figures, tables, equations and sections, and `:ref[fig:x]` references that read as the number |
 
 ### Steps
 
@@ -2014,6 +2094,122 @@ The stylesheet that comes with the components has selectors with no specificity,
 | `--tabs-selected-line` | the text colour |
 
 `tabs({ css: false })` leaves it out and keeps the markup. To change the markup, export your own `tabs` and `tab` from a [directives module](docs#declaring-directives). They get `label` and `children`, a `tabs` also gets `group` and `code` (`"true"` for a code group), and a `tab` gets `index`. The `label` of a tab is the content of its heading, or the name of its fence as text. The plugin's own are at `@mdsvex/plugin-tabs/Tabs.svelte` and `@mdsvex/plugin-tabs/Tab.svelte`. It needs Svelte 5.20 or later.
+
+### Elements
+
+```bash
+pnpm add --save-dev @mdsvex/plugin-elements@next
+```
+
+```js
+import { elements } from '@mdsvex/plugin-elements';
+
+mdsvex({ plugins: [elements()] });
+```
+
+Directives over plain HTML elements. A document imports only the ones it uses, none loads a script, and each works without JavaScript:
+
+| directive | renders |
+| --- | --- |
+| `:::details[Summary]` | a `<details>` with the bracket text as its summary, `(open=true)` opens it |
+| `:::accordion` | a `<details>` for each heading written directly inside it |
+| `:kbd[Ctrl]` | a `<kbd>` |
+| `:ruby[漢字](rt=かんじ)` | a `<ruby>` with the reading in `<rt>` and `<rp>` fallbacks |
+| `:badge[new](tone=tip)` | a `<span class="badge">`, tinted by `note`, `tip`, `warning` or `danger` |
+
+An accordion splits like [tabs](docs#tabs): the first heading written directly inside sets the depth, and each heading of that depth starts an item whose summary is the text of the heading, so it gets no id and no place in a table of contents. `(name=faq)` gives every item the `name` of a `<details>`, so opening one closes the others. A `:::details` written directly inside is an item too.
+
+````svx
+:::accordion(name=faq)
+
+## Is it free?
+
+Yes.
+
+## Does it work without JavaScript?
+
+Every part of it.
+
+:::
+````
+
+A `<details>` is a disclosure the browser already makes accessible, a button in the tab order that announces whether it is expanded.
+
+The build warns, with the line, about an accordion with no items (`no_items`), content before its first item (`content_before_first_item`), an empty heading in one (`item_without_label`) and a `:ruby` with no `rt` (`ruby_without_rt`).
+
+The stylesheet has selectors with no specificity and reads `--elements-line`, `--elements-radius` and `--elements-padding` from `.details` and `.accordion`, `--kbd-line` from `.kbd` and `--badge-color` from `.badge`. `elements({ css: false })` leaves it out and keeps the markup. To change the markup, export a component under the name of the directive from a [directives module](docs#declaring-directives). It gets the args as string props, and `label` and `children`. The plugin's own are exported as `@mdsvex/plugin-elements/Details.svelte` and so on.
+
+### Embeds
+
+```bash
+pnpm add --save-dev @mdsvex/plugin-embeds@next
+```
+
+```js
+import { embeds } from '@mdsvex/plugin-embeds';
+
+mdsvex({ plugins: [embeds()] });
+```
+
+`::youtube[Title](id=...)` is a lazy YouTube player from `youtube-nocookie.com`, which sets no cookie until the video plays, and `::vimeo[Title](id=...)` a lazy Vimeo player with `dnt=1`. `start` is a time in seconds. The bracket text is the title of the frame, which is what a screen reader announces, and `(title=...)` sets it instead. The build warns about an embed with no id or one that is no id on its site (`embed_id`), and one with no title (`embed_without_title`). `embeds({ css: false })` leaves the stylesheet out, and a `youtube` or `vimeo` from a [directives module](docs#declaring-directives) replaces the plugin's component.
+
+### Figures
+
+```bash
+pnpm add --save-dev @mdsvex/plugin-figures@next
+```
+
+```js
+import { figures } from '@mdsvex/plugin-figures';
+
+mdsvex({ unwrap_images: true, plugins: [figures()] });
+```
+
+`:::figure` puts what is written inside it, an image, a code block, a table or a diagram, in a `<figure>` with the bracket text as its `<figcaption>`. It is the one way to make a figure: a lone image stays an image, unwrapped by [`unwrap_images`](docs#unwrap_images).
+
+````svx
+:::figure[Sales by month](id=fig:sales)
+
+![A bar chart of sales by month](./chart.png)
+
+:::
+````
+
+The `id` is optional and stays on the `<figure>`, as an id you wrote, so one a heading already has fails the build. With `unwrap_images` an image alone in the figure has no `<p>`. A figure has no number of its own: a numbering plugin gives it one through [plugin data](docs#plugin-data), and the caption then starts with "Figure 3", or is "Figure 3" alone when the figure has no caption. An empty figure warns (`empty_figure`). `figures({ css: false })` leaves the stylesheet out, and a `figure` from a [directives module](docs#declaring-directives) replaces the plugin's component.
+
+### Code blocks
+
+```bash
+pnpm add --save-dev @mdsvex/plugin-code-blocks@next
+```
+
+```js
+import { code_blocks } from '@mdsvex/plugin-code-blocks';
+
+mdsvex({ plugins: [code_blocks()] });
+```
+
+Replaces `pre` with a code block that has a copy button, the title of the fence above the code and its caption below. The button is named "Copy code of" and the title, a `status` region beside it announces "Copied" or "Copy failed", and `nocopy` in the fence meta leaves it out. It copies the `code` prop, so [live values](docs#live-code) are copied as the reader sees them. Without JavaScript the stylesheet hides the button. In a code group of [tabs](docs#tabs) the tab shows the title, so the code block hides its own. A `pre` from a `components` module or a template replaces it, and the plugin's own is exported as `@mdsvex/plugin-code-blocks/Pre.svelte`.
+
+### Diagrams
+
+```bash
+pnpm add --save-dev @mdsvex/plugin-diagram@next pele
+```
+
+```js
+import { diagram } from '@mdsvex/plugin-diagram';
+
+mdsvex({ plugins: [diagram()] });
+```
+
+Each `mermaid` fence is drawn as a diagram, by [pele](https://pele.run) or by [mermaid](https://mermaid.js.org). Both are optional peer dependencies, install the one you want. `engine: 'auto'`, the default, takes pele when it is installed and mermaid otherwise, and the choice is made once, when `diagram()` runs, so the page never imports a package you didn't install. With neither installed it throws a `DiagramError` that says what to install.
+
+**With pele** the diagram is drawn at build time and the page ships the SVG, with no script, so it shows without JavaScript too. It is themed by CSS variables such as `--pele-bg` and `--pele-fg`, with dark values for a reader whose system is dark, so light and dark need no second render. A diagram pele can't draw is a `diagram_error` warning at its fence and shows its source, and `diagram({ strict: true })` fails the build there instead. `pele` passes [render options](https://pele.run/api) such as `fontFamily`. pele reads Mermaid syntax with its own layout, and has no Mermaid themes, no HTML labels and no JavaScript click callbacks.
+
+**With mermaid** the server renders the code and the browser loads mermaid on a page that has a diagram and draws it in place of the code. Without JavaScript the reader sees the code.
+
+The plugin wraps each `mermaid` fence in a `diagram` directive, so the code still renders through whatever replaces `pre`, as the source in a closed "Diagram source" disclosure under the drawing. The `title` and `caption` of the fence go around the diagram, and `accTitle:` and `accDescr:` name it for screen readers. The highlighter has no mermaid grammar, so the build warns once per file that the code renders plain.
 
 ### Anchors
 
@@ -2492,6 +2688,125 @@ The citations and their entries are [plugin data](docs#plugin-data), `plugin_dat
 
 The file is read while the document compiles, so the Vite plugin and [`compile_async`](docs#compile_async), with a `read` option, take a document that cites, and `compile` throws a `PluginAsyncError`. The formatting is small on purpose: names, year, title, where it was published, the publisher and a link. Citation styles such as APA or Chicago, locators like page numbers, and telling apart two works of one author in one year need a full CSL processor.
 
+### Link check
+
+```bash
+pnpm add --save-dev @mdsvex/plugin-link-check@next
+```
+
+```js
+import { link_check } from '@mdsvex/plugin-link-check';
+
+mdsvex({
+	heading_ids: true,
+	links: { routes: 'src/routes' },
+	plugins: [link_check({ routes: 'src/routes' })]
+});
+```
+
+Warns at every link that goes nowhere, with the line of the link, as the compile warns about anything else:
+
+```svx
+# Install
+
+See [the setup](#setup), [the guide](../guide/+page.md#usage) and [the api](/api#options).
+```
+
+```
+#setup links to no element of this document, none has the id "setup"
+../guide/+page.md#usage links to src/routes/guide/+page.md, which has no element with the id "usage"
+```
+
+```ts
+link_check({
+	documents: boolean = true, // check links to other documents too
+	heading_ids: boolean | { slug } = true, // how other documents' headings get ids
+	routes: string, // the directory whose documents are routes, as links.routes
+	extensions: string[] = ['.md', '.svx'],
+	base: string, // a root url written with the base has it taken off
+	ignore: (href, filename) => boolean,
+	strict: boolean = false // fail the compile with a LinkCheckError
+});
+```
+
+- **Within a page**, `#id` is checked against every id the document gives an element: the ids of headings, which need [`heading_ids`](docs#heading_ids), an `id` typed on an element, the `name` of an `<a>`, the `id` arg of a directive, the `fn-` ids of footnotes and an id a plugin gave a node. `#top` and `#` need none. An id a component makes as it renders is not known, skip it with `ignore`.
+- **Other documents** are checked by file, `./guide.md#usage`, relative to the document, and by route, `/guide#usage`, when `routes` names the directory of your routes, as [`links.routes`](docs#links) does. A route is the document `guide.md`, `guide/+page.md` or `guide/index.md`, with each extension. A route with no such document is not reported, since it may be a Svelte page, and neither is a route inside a `(group)`. A root url with no fragment is not checked.
+- **What is read.** Each linked document is read and compiled once for every document that links to it, with the `heading_ids` given to the plugin, so give it the value you give mdsvex when that is not `true`. A link to a document that does not exist is a warning too, and the file it names is watched, so creating it checks the link again.
+- **In the dev server** a document that links to another is a [dependency](docs#loading-files) of it. Change the headings of `guide.md` and every document that links to it compiles again and warns about what now goes nowhere.
+- **`strict`** fails a document that has a link that goes nowhere with a `LinkCheckError`, after the warnings, its `links` listing each one. Turn it on for a build:
+
+```js
+export default defineConfig(({ command }) => ({
+	plugins: [mdsvex({ plugins: [link_check({ strict: command === 'build' })] })]
+}));
+```
+
+Other documents are read while the document compiles, so the Vite plugin and [`compile_async`](docs#compile_async), with a `read` option, check them, and `compile` throws a `PluginAsyncError` for a document that links to another. `documents: false` checks links within a page alone, under `compile` too. Markdown links are checked, not an `<a>` typed as html, and not files that are no documents, such as images.
+
+### Numbering
+
+```bash
+pnpm add --save-dev @mdsvex/plugin-numbering@next
+```
+
+```js
+import { figures } from '@mdsvex/plugin-figures';
+import { numbering } from '@mdsvex/plugin-numbering';
+
+mdsvex({ heading_ids: true, plugins: [figures(), numbering()] });
+```
+
+Numbers figures, tables, equations and sections, and turns `:ref[id]` into a link that reads as the number, in the way of [pandoc-crossref](https://lierdakil.github.io/pandoc-crossref/). The prefix of an id says what it is:
+
+````svx
+## Results
+
+:::figure[Sales by month](id=fig:sales)
+![A bar chart of sales by month](./sales.png)
+:::
+
+:::table[What each plan costs](id=tbl:plans)
+| plan | price |
+| --- | --- |
+| free | 0 |
+:::
+
+```math id=eq:energy
+E = mc^2
+```
+
+Sales rose in March (:ref[fig:sales]), the plans are in :ref[tbl:plans], :ref[eq:energy] gives the energy and :ref[sec:results] has the rest.
+````
+
+```html
+<figure id="tbl:plans" class="table">
+	<figcaption><span class="table-number">Table 1</span>: What each plan costs</figcaption>
+	<table>...</table>
+</figure>
+<p>
+	Sales rose in March (<span class="ref"><a href="#fig:sales">Figure 1</a></span>), the plans are in
+	<span class="ref"><a href="#tbl:plans">Table 1</a></span>, <span class="ref"><a href="#eq:energy">Equation 1</a></span>
+	gives the energy and <span class="ref"><a href="#results">Section 1</a></span> has the rest.
+</p>
+```
+
+```ts
+numbering({
+	prefixes: { fig: ['Figure', 'Figures'], tbl, eq, sec }, // the word for one and for several, by kind
+	and: 'and', // what joins the last two numbers
+	number_sections: boolean = false, // the number in front of each heading
+	section_depth: number = 2 // the depth of the headings numbered 1, 2, 3
+});
+```
+
+- **`fig:`** is the `:::figure[Caption](id=fig:x)` of [`@mdsvex/plugin-figures`](docs#figures), **`tbl:`** is `:::table[Caption](id=tbl:x)` around a table, **`eq:`** is a `math` fence with `id=eq:x` in its meta and **`sec:`** is a heading, `sec:` and its id. Each kind counts on its own, in document order.
+- **A figure or table is numbered** when it has an id with its prefix, with a caption or without. The figures plugin owns the figure and renders its number, this plugin observes it.
+- **An equation** gets its number as `\tag{n}`, which the [math renderer](docs#math-1) shows beside it, inside a `<div class="equation">` with its id.
+- **`:ref[fig:a, fig:b]`** reads "Figures 1 and 2", the plural word, each number a link. A reference to an id that is not there is a warning and reads "Figure ?".
+- **`prefix`** replaces the word: `:ref[fig:sales](prefix=Chart)` reads "Chart 1" and `prefix="Bar chart"` "Bar chart 1", the word as written, so a reference to several ids takes the plural. Only the literal `prefix=false` leaves the word out, "1" or "1 and 2". A capital for the start of a sentence is a word too, `prefix=Fig.` beside `prefixes: { fig: ['fig.', 'figs.'] }`.
+- **Ids of different kinds** in one reference are a warning. It reads each kind with its own word, "Figure 1 and Table 1", and ignores a written `prefix`.
+- **In a streaming view** a number is known when its target closes, and never changes. A reference to a target that has not arrived reads "Figure ?" until it does. Components read the numbers from [plugin data](docs#plugin-data), `plugin_data.numbering['target:' + id]`, through Svelte context.
+
 ## Syntax highlighting
 
 The Vite plugin highlights fenced code and [inline code with a language](docs#inline-code) with [twinkleplop][twinkleplop], with no setup. Every bundled language loads the first time a document has code.
@@ -2820,6 +3135,8 @@ A copy button with a filename:
 // src/lib/markdown.js
 export { default as pre } from './markdown/Pre.svelte';
 ```
+
+[`@mdsvex/plugin-code-blocks`](docs#code-blocks) is a finished one, with an announced result and the caption, to use or to copy.
 
 Meta that no convention claims becomes props. `key="value"`, `key='value'` and `key=value` give a string, and a bare `key` gives `true`:
 
@@ -3156,7 +3473,7 @@ The reference renders as a number that links to the note, and the notes are coll
 ```
 
 - **A label** is any run of characters without whitespace, brackets or `^`. Labels match exactly, case included. The number a reader sees comes from the order of the references, not from the label, so `[^smith]` is as good a label as `[^2]`.
-- **A definition** is a line that starts with `[^label]:` and has text after it. It may hold links, emphasis, code and references to other notes. It can be written anywhere: under the paragraph that cites it, at the end of the document, inside a block quote or a list item. Wherever it is, it renders in the section at the end.
+- **A definition** is a line that starts with `[^label]:` and has text after it, or text on the lines below indented by four spaces, which is how Prettier writes a long one. It may hold links, emphasis, code and references to other notes. It can be written anywhere: under the paragraph that cites it, at the end of the document, inside a block quote or a list item. Wherever it is, it renders in the section at the end.
 - **A longer note** continues as a list item does. After a blank line, a block indented by four spaces belongs to the note, and the first line that is not blank and not indented ends it:
 
   ```md
@@ -3181,7 +3498,7 @@ The class \[^abc] matches, and so does `[^abc]`.
 
 ### Footnote errors
 
-A reference with no definition and a label defined twice fail the build with a `FootnoteError`. It has the `code` (`footnote_undefined` or `footnote_duplicate`), the `label`, and the `line` and `column` of the reference or of the second definition, and `problems` lists every one in the document:
+A reference with no definition, a label defined twice and a definition with no text fail the build with a `FootnoteError`. It has the `code` (`footnote_undefined`, `footnote_duplicate` or `footnote_empty`), the `label`, and the `line` and `column` of the reference or of the definition, and `problems` lists every one in the document:
 
 ```
 the footnote reference [^nope] has no definition, add `[^nope]: text`, or escape the bracket as `\[^nope]` if it is not a footnote (src/routes/post.svx:12)
@@ -3480,6 +3797,59 @@ A `RunError` has a `code` (`run_module`, `run_pre`, `run_lang`, `run_eval` or `r
 
 The editor shows a block that runs as code, and reports one the build would reject at its fence. It doesn't check the code as a module yet.
 
+## Formatting with Prettier
+
+`@mdsvex/prettier-plugin` formats documents with [Prettier](https://prettier.io):
+
+```bash
+pnpm add --save-dev prettier @mdsvex/prettier-plugin@next
+```
+
+```json
+{
+	"plugins": ["@mdsvex/prettier-plugin"]
+}
+```
+
+Prettier picks the plugin for `.svx` and `.pfm` files from their extension. For another extension in `extensions`, add an override that sets `"parser": "mdsvex"` for it.
+
+The plugin formats the Svelte in a document as [prettier-plugin-svelte](https://github.com/sveltejs/prettier-plugin-svelte) formats a component. A tag that does not fit on a line puts its attributes one to a line, the children of elements, components and blocks such as `{#if}` are indented, markdown included, and scripts move to the top and styles to the end as `svelteSortOrder` says. The markdown is formatted as Prettier formats markdown: `-` bullets, ordered lists counted from their start, padded and aligned tables, a blank line between blocks, list items lined up with their content and `> ` on every line of a quote. Emphasis stays as PFM writes it, `_` for emphasis and `*` for strong. `proseWrap` works as it does for markdown, `always` fills the line and `never` puts a paragraph on one line.
+
+The code in a document is formatted with your Prettier options:
+
+| part | formatted |
+| --- | --- |
+| frontmatter | as yaml, unless the project parses it with [`frontmatter.parse`](docs#custom-frontmatter-parsers) |
+| imports, `<script>`, `<style>` | as code, TypeScript with `lang="ts"`, scss or less with `lang` |
+| `{expression}`, `{@html}`, `{@render}`, `{@const}` | on one line |
+| the heads of `{#if}`, `{#each}`, `{#await}`, `{#key}`, `{#snippet}` | on one line |
+| attribute expressions | on one line, the tag keeps its line breaks and the order of its attributes |
+| code fences | kept as written, see `mdsvexFormatFences` below |
+
+A part that does not parse is kept as written.
+
+### Plugin options
+
+| option | default | what it does |
+| --- | --- | --- |
+| `mdsvexFormatFences` | `false` | formats a fence whose info string is only a language Prettier knows. A fence with meta, such as a line range, or with an annotation is still kept, as its line numbers count the lines of the code |
+| `mdsvexFrontmatter` | `"auto"` | `"auto"` formats frontmatter as yaml unless the manifest the Vite plugin writes says the project parses it itself, `"yaml"` always formats it and `"keep"` never does |
+
+### Leaving parts alone
+
+```svx
+<!-- prettier-ignore -->
+{items.map((item)=>item.name)}
+
+<!-- prettier-ignore-start -->
+| kept | as  |
+| ---- | --- |
+| it   | is  |
+<!-- prettier-ignore-end -->
+```
+
+`<!-- prettier-ignore -->` keeps the block after it, or the next node when it sits in a paragraph. Everything between `<!-- prettier-ignore-start -->` and `<!-- prettier-ignore-end -->` at the top of a document is kept. `<!-- @format -->` at the top, or after the frontmatter, works with `--require-pragma` and `--insert-pragma`.
+
 ## Without Vite
 
 The Vite plugin reads files, finds the names your modules export, serves modules that don't exist on disk and reloads pages as you edit. [`compile`](docs#compile) does none of that. It takes text and returns Svelte source, never touches the filesystem and runs in a browser, a worker or Node. Everything below is what a build tool, a playground or an editor that isn't Vite supplies to get the same output.
@@ -3496,10 +3866,12 @@ Import the compiler from `mdsvex/compile`, highlighting from `mdsvex/highlight` 
 | [math](docs#math-with-compile) | a renderer from `load_math` in `mdsvex/math` |
 | [images as imports](docs#import_images) | `import_images: true`, then a bundler that imports images |
 | [links](docs#links) | `routes`, and `base` as a string or `{ import, from }` |
-| [code from a file](docs#code-from-a-file) | the text of each file in `sources` |
+| [code from a file](docs#code-from-a-file) | the text of each file in `sources`, or `read` and `resolve` with [`compile_async`](docs#compile_async) |
 | [code that runs](docs#running-with-compile) | `snippets`, then serving each of `result.snippets` as a module |
 | templates, components, directives | each module as its specifier and the names it exports, see below |
-| plugins | `plugins`, as for the Vite plugin |
+| plugins | `plugins`, as for the Vite plugin, and [`compile_async`](docs#compile_async) for one that [defers work](docs#deferred-work) |
+| plugins that [load files](docs#loading-files) | `read` and `resolve`, with `compile_async` |
+| rebuilding when a file changes | watching `dependencies` on the result, see [below](docs#files-and-plugins-that-wait) |
 | [plugin data](docs#plugin-data) | nothing, it is `data` on the result |
 | a template for one import | the `template` option of that compile, in place of `?template=` |
 
@@ -3539,10 +3911,16 @@ These need a dev server or Vite's config, so they stay with the plugin:
 - **The checks on `?metadata` and `?data` imports.** In dev the plugin serves a document only when Vite would serve the file, so a request can't read files outside the project.
 - **Source maps back to markdown.** `compile` with `sourcemap: true` maps its own output, and `mappings_to_v3` from `@mdsvex/render/sourcemap` turns that into a v3 map. Chaining it with the Svelte compiler's map is up to your bundler.
 - **`?template=`** on an import. Use the `template` option of the compile.
-- **Hot update** of documents, of the files a fence shows and of template and component modules.
+- **Hot update** of documents, of the files a fence shows and of template and component modules. A host that rebuilds watches `dependencies` instead, see below.
 
-<!-- placeholder: compile_async and a public parse, then render, from design/plugin-async.md, document them here once merged -->
-**Coming soon:** an async compile that waits for plugins, and a public two-step compile that tells a host which files a document shows before it renders, so `sources` can be filled in one pass.
+### Files and plugins that wait
+
+`compile` reads nothing and waits for nothing. There are two ways to give a document the files it shows and the work its plugins defer:
+
+- **[`compile_async`](docs#compile_async)** does it in one call. Pass `read` and `resolve` and it reads the files fences show with `src=` and what plugins load, then waits for deferred work. Use it for a build where the host can read files, in Node or a worker with a virtual filesystem.
+- **[Compiling in steps](docs#compiling-in-steps)** hands the waiting to you: `parse`, then `settle` for deferred work, then read each of `parsed.needs` yourself and `render`. Use it when files arrive another way, such as a fetch or an editor's open buffers, or to compile other documents while one waits. The playground compiles this way.
+
+The result's `dependencies` are absolute paths: what plugins read or named, and, when `compile_async` read them, the files fences show and the module of the template. Compiling in steps, you know the files you read for `needs` yourself. To rebuild as the Vite plugin does in dev, watch those files, and when one changes call `session.invalidate([path])` on your `CompilerSession`, so what [`ctx.cached`](docs#loading-files) kept from it goes, then compile the documents that list it again. With `compile_async`, pass that session as its third argument.
 
 ## Migrating from mdsvex 0.x
 
@@ -3787,12 +4165,13 @@ mdsvex 0.x ran remark and rehype, and took their plugins in `remarkPlugins` and 
 | `rehype-rewrite`, `rehype-wrap`, `rehype-components` | a component | [replace the element](docs#custom-components) with a component of your own |
 | `rehype-class-names`, `rehype-add-classes` | a parse plugin | `{ table: { parse(node) { node.attrs.class = 'table'; } } }` in [`parse_plugins`](docs#parse_plugins) |
 | `remark-sectionize`, `rehype-section` | a parse plugin | the `sections` plugin under [plugin handlers](docs#plugin-handlers) |
-| `rehype-figure`, `remark-figure-caption` | a component | `unwrap_images: true` and an `img` replacement that renders a `<figure>`, as under [`unwrap_images`](docs#unwrap_images) |
+| `rehype-figure`, `remark-figure-caption` | [`@mdsvex/plugin-figures`](docs#figures) | `:::figure[Caption]` around an image or anything else, with the caption in a `<figcaption>`. A lone image stays an image |
 | `rehype-img-size`, `rehype-plugin-image-native-lazy-loading` | a component | an `img` replacement sets `loading="lazy"`. For sizes, import the image with `?enhanced` from [`@sveltejs/enhanced-img`][enhanced-img], the replacement gets the imported value as `src` |
-| `rehype-mermaid`, `remark-mermaidjs` | a component | a [`pre` replacement](docs#code-block-components) that draws its `code` in the browser when `lang` is `mermaid` |
-| `remark-embedder`, `remark-oembed`, `remark-youtube` | a component | a leaf directive, `::youtube[A talk](id=dQw4w9WgXcQ)`, see [directives](docs#the-three-forms) |
+| `rehype-mermaid`, `remark-mermaidjs` | [`@mdsvex/plugin-diagram`](docs#diagrams) | `diagram()` draws each `mermaid` fence, at build time with `pele` installed or in the browser with `mermaid` |
+| `remark-embedder`, `remark-oembed`, `remark-youtube` | [`@mdsvex/plugin-embeds`](docs#embeds) | `::youtube[A talk](id=dQw4w9WgXcQ)` and `::vimeo`. Any other site is a leaf directive with a component of your own, see [directives](docs#the-three-forms) |
 | `remark-abbr` | a component | an inline directive, `:abbr[HTML](title=HyperText)` |
-| `remark-collapse` | nothing needed | `<details>` and `<summary>` work as typed, with markdown inside |
+| `remark-collapse` | nothing needed | `<details>` and `<summary>` work as typed, with markdown inside, and [`@mdsvex/plugin-elements`](docs#elements) adds `:::details[Summary]` and accordions |
+| `remark-kbd`, `remark-ruby` | [`@mdsvex/plugin-elements`](docs#elements) | `:kbd[Ctrl]` and `:ruby[漢字](rt=かんじ)` |
 | `rehype-meta`, `rehype-document` | a template | a [template](docs#templates-1) renders `<svelte:head>` from its props |
 | `rehype-video` | a component | an `a` or `img` replacement that renders a `<video>` for a video url |
 

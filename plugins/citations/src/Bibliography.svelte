@@ -1,8 +1,9 @@
 <script>
+	import { getContext } from 'svelte';
 	import { bibliography_of, entry_parts } from './list.js';
 
 	/**
-	 * @type {{
+	 * @typedef {{
 	 *   data?: import('./list.js').CitationsData | string,
 	 *   style?: import('./list.js').CitationStyle,
 	 *   label?: import('svelte').Snippet,
@@ -10,8 +11,10 @@
 	 *   class?: import('svelte/elements').ClassValue,
 	 *   'aria-label'?: string,
 	 *   [attribute: string]: unknown,
-	 * }}
+	 * }} Props
 	 */
+
+	/** @type {Props} */
 	let {
 		data,
 		style = 'numeric',
@@ -24,9 +27,16 @@
 
 	const id = $props.id();
 
-	// the directive gives the data as json, a template or a streaming view the object
+	// what the plugins wrote, from a compiled document or a stream, current changes as citations arrive
+	/** @type {import('mdsvex/compile').PluginDataContext | undefined} */
+	const plugin_data = getContext(Symbol.for('mdsvex.plugin_data'));
+
+	// the directive hands over the whole data as json once the document is complete, a template the object
 	const entries = $derived(
-		bibliography_of(typeof data === 'string' ? JSON.parse(data) : data, style)
+		bibliography_of(
+			typeof data === 'string' ? JSON.parse(data) : (data ?? plugin_data?.current?.citations),
+			style
+		)
 	);
 </script>
 

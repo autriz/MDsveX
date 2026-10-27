@@ -45,6 +45,7 @@ The view exposes:
 - Type-specific properties surfaced directly (`depth` for headings, `info` for code fences, etc.)
 - `info` — the info string of a code fence, its language and everything after it, see [The info string of a fence](#the-info-string-of-a-fence). `lang` is the same string under its older name.
 - `math` — `true` for a `code_span` written as inline math (`` $`x`$ ``), whose text is the LaTeX, `false` for any other code span and `undefined` for any other node. A `code_span` handler sees both.
+- A `definition` is a link reference definition, `[label]: href "title"`. It carries `label`, `href` and `title` (only when not empty) in `node.attrs`, has no children and renders nothing. The links that use it already carry its `href` and `title`.
 - A `footnote_reference` and a `footnote_definition` carry their label as `node.attrs.label`. The text of a reference is empty, and the text of a definition is that of its blocks. `footnote_index(buf)` from `@mdsvex/parse/buf-utils` numbers the footnotes of a finished tree as the compile does.
 
 **Writable properties**
@@ -176,7 +177,7 @@ What follows from it:
 - **A removed wrapper takes no more children.** The later children of its parent go to the parent.
 - **Its handlers have run.** A removal in a close callback comes after every handler inside the node. In a sequential pass, a node removed in its own handler is not walked: no handler runs for what it held, and the close callback it returned does not run.
 - **The parser can still revoke it.** A delimiter that never closes is revoked after its paragraph closed, by which time the paragraph's callback may have removed it. Such a revoke undoes what the node's handlers did and repairs nothing, and the node stays out.
-- **`heading_ids` in `mdsvex` runs between the two passes,** so a heading removed in a sequential pass has already taken its id, and one removed in the fused pass has not.
+- **A heading removed in its own close callback gets no id,** see [Heading ids](#heading-ids). One removed later has already taken its id.
 
 ### Grouping siblings: `wrap_from`
 
@@ -231,7 +232,7 @@ A view belongs to the document it was made for. A close callback can hold the vi
 
 ## The Context
 
-The second argument of every handler is its context. Each plugin gets its own for each document, so it is also where a plugin keeps what it needs between its handlers: any key the plugin sets is its own, and no other plugin sees it.
+The second argument of every handler is its context. Each plugin gets its own for each document. What a plugin keeps between its handlers goes in [`ctx.scratch`](#ctxscratch).
 
 ```js
 const toc = {
@@ -259,10 +260,12 @@ const toc = {
 | `ctx.set(key, value)` | one value under a key of what the plugin hands back from the parse |
 | `ctx.add(key, value)` | one entry of a list under a key, in document order |
 | `ctx.data` | what the plugin has written so far, read-only |
+| `ctx.scratch` | what the plugin keeps for itself through the document, never published |
 | `ctx.defer(node, task)` | async work for the node, see [Deferred tasks](#deferred-tasks) |
 | `ctx.depend(path)` | names a file the output depends on, see [Loading](#loading-and-dependencies) |
 | `ctx.read(path)`, `ctx.resolve(specifier)` | read and resolve with what the host passes |
 | `ctx.cached(key, load)` | a load shared by the documents of a compiler |
+| `ctx.id(base)` | an id no element of the document has, see [Ids](#ids) |
 
 A handler bound to a directive gets the same members beside `directive`, `index` and `state`.
 
@@ -311,7 +314,7 @@ A write belongs to the node whose handler or close callback made it, whichever n
 - **A revoke takes back exactly the owner's writes.** When the parser revokes a node, every `set` and `add` it owned goes and each key holds what it would have held without them. A link with no destination, an emphasis that never closes and the paragraphs of a tight list all go this way, so a handler can write as soon as it knows something.
 - **`add` keeps entries in document order.** An entry sorts by its owner's place in the source, not by when it was written. The close callback of a heading runs after those of the links inside it and still comes first, and a batch parse, a parse fed in pieces and a tree built over the wire give the same list. One owner's entries keep the order it added them. Entries with no owner come after the rest, in the order they were added.
 - **`set` resolves conflicts by document order too.** Of two owners that set one key, the value of the later one in the source stays. One owner that sets a key twice leaves its last value. A `set` with no owner comes after every owner, and of two such the last one stays. So the result does not depend on the order handlers ran in.
-- **Nothing else is undone.** What a plugin keeps on its own keys of `ctx`, or in a variable, is not owned and a revoke leaves it as it was.
+- **Nothing else is undone.** What a plugin keeps in [`ctx.scratch`](#ctxscratch), or in a variable, is not owned and a revoke leaves it as it was.
 
 #### Values are json
 
@@ -346,6 +349,60 @@ const stop = dispatcher.on_data(({ plugin, key, value }) => {
 - **A streaming view** follows these so a component that reads the data renders again as it changes. A compile ignores them and reads `data()` at the end.
 - **A listener stays from one document to the next.** The function `on_data` returns stops it.
 
+### Ids
+
+A plugin that gives a node an id asks for one, so it never takes an id a heading, a footnote or another plugin has:
+
+```js
+link: {
+  parse(node, ctx) {
+    return () => {
+      node.attrs.id = ctx.id(node.text_content); // 'install', then 'install-1'
+    };
+  }
+}
+```
+
+- **A free id from the base.** The base itself, or the next repeat of it that is free, `-1`, `-2`, as heading ids are numbered. Ids are given in the order handlers ask, which is document order for the fused pass, and the sequential passes and document hooks come after it.
+- **One set of ids for the document.** With a `HeadingIds` on the builder, `heading_ids` in `mdsvex`, the headings, the element headings with an id, the footnotes and every plugin share it, see [Heading ids](#heading-ids). Without one, a dispatcher keeps a set of its own for the ids plugins ask for.
+- **Owned like a write.** The id belongs to the node whose handler asked, and a revoke of that node frees it.
+- **`ctx.id(id, { fixed: true })`** is for an id the author wrote, such as `{#install}` in a heading a plugin reads. It is kept as it is, and one a node before it was given is a `HeadingIdError`. An id set straight on a heading with `node.attrs.id` counts as fixed too.
+- **Only in a handler,** a close callback, a sequential pass or a document hook. A deferred task has none, ask in the handler that defers.
+
+### `ctx.scratch`
+
+What a plugin keeps for itself through one document: the lists it has seen, a counter, the node it will fill in at the end. Nothing in it is published.
+
+```js
+const plugin = {
+  name: 'refs',
+  parse: {
+    document(root, ctx) {
+      // no walk to find the lists, the handler kept them
+      for (const list of ctx.scratch.lists ?? []) list.attrs.count = String(ctx.data.cited?.length ?? 0);
+    },
+  },
+  directives: {
+    references: {
+      parse(node, ctx) {
+        const lists = (ctx.scratch.lists ??= []);
+        if (lists.length > 0) ctx.warn('more_than_one', 'one list is enough', node);
+        lists.push(node);
+      },
+    },
+  },
+};
+```
+
+- **One object per plugin name, per document.** Every handler, close callback, sequential pass, handler bound to a directive, deferred task and document hook of the plugin gets the same one. Plugins that share a name share it, so the `parse` plugin and the `directives` of one `mdsvex` plugin meet there. Reading it throws for a plugin with no `name`.
+- **Anything goes in it,** nodes, maps, functions. It is never checked as JSON, never part of `data()`, the compile result or a data event.
+- **It is made empty for each document** and dropped when the dispatcher takes the next one. A node kept in it stays a valid view until then, so the document hook can read the nodes the handlers kept.
+- **A revoke does not touch it.** What a handler of a revoked node put there stays. So keep there only what a revoke cannot make wrong: facts about, and nodes of, the kinds the parser never revokes (a block directive, a heading at its close), and anything from a sequential pass or the hook. A node that may be revoked does not belong there: once revoked it is out of the tree, and its view does not say so the same way for every construct. A value that must follow revocation goes through `ctx.set` and `ctx.add`.
+- **A deferred task writes to it at once,** not with the task's other changes, and the write stays if its node is revoked and those changes are dropped.
+- **It is not `ctx.state`.** The state of a [bound handler](#the-context-1) is one object per directive in the document and its writes are undone with their node. The scratch is one per plugin for the whole document and is never undone.
+
+A key put on `ctx` itself is not part of the context: TypeScript rejects one, and a bound handler's context is new for each call, so what it was given is gone after the call.
+
 ### Deferred tasks
 
 A handler cannot wait: the parser does not pause for it, and neither does a stream. `ctx.defer(node, task)` starts async work for a node and lets the parse carry on:
@@ -373,7 +430,8 @@ directive_inline: {
 - **Applied in document order.** A host applies tasks sorted by where their nodes are in the source, and tasks of one node in the order they started. Data is owned by the node, so it sorts as any write does.
 - **A value JSON cannot hold** throws a `PluginDataError` in the task, at the write.
 - **Sharing work** between tasks and documents, such as loading a bibliography once, goes through [`ctx.cached`](#shared-loads).
-- **The task's context** has `filename`, `frontmatter`, `data`, `set`, `add`, `warn`, `depend`, `read`, `resolve` and `cached`.
+- **What it adds is the host's to see.** A host that looks through the tree for what a document needs looks again once the tasks applied. In `mdsvex`, `CompilerSession.settle` makes `Parsed.needs` again, so an image whose `src` a task set is imported and a fence it adds with `src=` shows its file, in `compile_async` and the Vite plugin alike. The same holds for an async document hook.
+- **The task's context** has `filename`, `frontmatter`, `data`, `scratch`, `set`, `add`, `warn`, `depend`, `read`, `resolve` and `cached`.
 
 A parse that cannot wait for async work throws a `PluginAsyncError` at the first `ctx.defer`. In `mdsvex` that is `compile()`, which points to `compile_async()`.
 
@@ -392,7 +450,7 @@ const outline = {
 };
 ```
 
-- **It runs once,** after the parse, after the sequential passes (`heading_ids` in `mdsvex` comes before them) and after every deferred task has applied. Hooks run in plugin order, each awaited before the next.
+- **It runs once,** after the parse, after the sequential passes and after every deferred task has applied. Hooks run in plugin order, each awaited before the next.
 - **It gets the root** and walks the tree itself. It may change any node, as a sequential pass may, and nothing in the tree is pending.
 - **Its writes belong to no node** and are never revoked. While a hook that returned a promise waits, its writes are still its own.
 - **It may be async.** One that returns a promise needs a host that waits, `compile_async()` in `mdsvex`. Under a parse that cannot wait it throws a `PluginAsyncError`. One that returns nothing runs under `compile()` too.
@@ -517,6 +575,23 @@ code_fence: {
 - **While the document streams**, the handlers run once the line of the opening fence is complete. Over the wire a fence with an empty info string is sent none, and its handlers run when its first text or its close arrives.
 - **Any other node has no `info`**, it reads `undefined`.
 
+### The code of a fence a plugin makes
+
+A fence keeps its code on itself, not in a text child. A fence a plugin makes has none, so the text of the nodes put in it is its code, in order, a break in them a line end:
+
+```js
+const fence = node.append('code_fence', { info: 'ts' });
+fence.append('text', 'let a = 1;\n');
+fence.append('text', 'let b = 2;');
+// renders as the fence typed with those two lines, fence.text_content is the code
+```
+
+- **Any way the fence was made**, `append`, `prepend` or `wrap_inner`, from a handler, a task or a document hook. A fence that `wrap_inner` puts around a paragraph has the paragraph's text as its code.
+- **Text put in a typed fence follows its code.**
+- **Everywhere the code is read**: the html, a highlighter, the `code` prop of a `pre` replacement, a block that runs. A fence with `src=` has no code of its own, so text in it is an error, as code typed in it is.
+- **A code span and a comment are the same.** They keep their text on themselves too, so the text a plugin puts in one is its code or its text, after any it was typed with: `node.append('code_span', { info: 'ts' }).append('text', 'let a')` renders as `` `#!ts let a` `` does.
+- `buf_code(buf, index, source)` from `@mdsvex/parse/buf-utils` reads it from a buffer.
+
 ### Where a Node Is Placed
 
 A parent can have an open wrapper that takes its later children, from `wrap_inner` or `wrap_from`. A node whose type has a handler is placed in three steps:
@@ -569,6 +644,28 @@ heading: {
 ```
 
 `link` is captured by closure. On close, the callback uses it directly — no lookup, no re-traversal.
+
+**A heading is settled when it closes.** Its line has ended, so anything in it that never closed, an element such as `<head>`, an emphasis with no closer or a link with no destination, is already text when its close callbacks run.
+
+### Heading ids
+
+A builder given a `HeadingIds` with `set_headings` makes the id of each heading at its close, as the `heading_ids` option of `mdsvex` does, the same on the batch builder, fed or whole, and on the wire builder:
+
+```js
+import { HeadingIds, heading_slug } from '@mdsvex/parse';
+
+const ids = new HeadingIds(heading_slug, is_entity_name);
+ids.start(source); // the source the value ranges index, none over the wire
+tree.set_headings(ids);
+// ... parse ...
+ids.finish(tree.get_buffer()); // WireTreeBuilder.end() does this
+```
+
+- **When.** After the close callbacks of the heading, or earlier: the first close callback that reads `node.attrs` gets the id made then. So a plugin that changes the text of a heading in its close callback, by removing a child say, changes the id only if it comes before the first plugin that reads it. An open handler never sees an id.
+- **From the ids before it.** `HeadingIds` is the one place a document's ids are given out, in document order. A made id is never one given before, a repeat gets `-1`, `-2`. An id the document fixes, set on a heading by a plugin or typed on an element heading, is kept, and one that a node before it was given is a `HeadingIdError` (code `id_taken`) naming both. `finish` gives the footnotes their ids last, and one a heading was given moves to the next free one, which `moved` lists for the renderer.
+- **An id a callback sets** after reading the made one takes its place, and the made one is free again.
+- **What is not the author's** is left out: text a plugin added, and what Svelte renders.
+- **A heading a plugin made something else,** or removed in its own close callback, gets none.
 
 ### Streaming vs Batch
 
@@ -748,13 +845,13 @@ An entry can hold three keys. Any other key is ignored, so a layer above can kee
 
 A handler is a function, not a `{ parse }` object. Like a plugin handler it may return a function, which runs when the node closes. A key that is not a node type throws when the tables are first used, and so does `text`: text goes to the [text handler](#text-handlers) of a sequential plugin. The one key of `children` that is no node type is `'*'`, see [A child of any type](#a-child-of-any-type).
 
-`directive_handlers` is an array of tables. When two tables have an entry for the same name the later one replaces the earlier one whole. The tables are read once per array, so pass the same array for every document and build a new one to change a handler.
+`directive_handlers` is an array of tables. A table's entry owns its name, with or without handlers, and a name has one owner: two tables with an entry for the same name throw a `DirectiveOwnerError` when the tables are first used, with `directive` and the two plugin names as `plugins`. Another plugin that wants to see the directive [observes it](#observing-a-directive). The tables are read once per array, so pass the same array for every document and build a new one to change a handler.
 
 A table can come with the name of the plugin it belongs to, as `{ name: 'steps', directives: bound }`. The name keys what its handlers write with `ctx.set` and `ctx.add` and is the `plugin` of their warnings. `mdsvex` passes each plugin's `directives` this way.
 
 ### The context
 
-A bound handler gets its own context in place of the plugin `ctx`. It has `filename`, `frontmatter`, `warn`, `set`, `add` and `data` as [the plugin context](#the-context) does, and three members of its own:
+A bound handler gets its own context in place of the plugin `ctx`, new for each call. It has `filename`, `frontmatter`, `warn`, `set`, `add`, `data` and `scratch` as [the plugin context](#the-context) does, and three members of its own:
 
 - **`ctx.directive`** is the view of the directive the handler is bound to.
 - **`ctx.index`** is how many times this handler has already run in this directive, 0 for the first call. `children.heading` and `descendants.heading` of one entry count apart.
@@ -859,6 +956,46 @@ A container with `children` or `descendants` handlers opens a scope when its nam
 - A scope ends when its directive closes, so that close goes through the dispatcher. The closes of the nodes inside it do not, unless a handler left something on them. The wire builder asks the dispatcher at every close, which is a few compares for a node no handler touched.
 
 Bound handlers run in the fused pass only. A sequential plugin sees the tree they left.
+
+### Observing a directive
+
+A directive has one owner, the table that binds its name. Another plugin reads it by observing it: numbering a figure, collecting the tabs of a page, checking an arg.
+
+```js
+const numbering = {
+  name: 'numbering',
+  observe: {
+    figure: {
+      parse(figure, ctx) {
+        // a block directive is never revoked, so a count in the scratch stays right
+        const number = (ctx.scratch.figures = (ctx.scratch.figures ?? 0) + 1);
+        const id = figure.attrs.args?.id;
+        if (id === undefined) return;
+        return () => {
+          const label = figure.first_child;
+          ctx.set('target:' + id, {
+            number,
+            caption: label?.type === 'directive_label' ? label.text_content : null,
+          });
+        };
+      },
+    },
+  },
+};
+```
+
+`observe` is a key of a parse plugin, a table keyed by directive name with the entries a table of bound handlers has: `parse`, `children` (`'*'` too) and `descendants`. Handlers get the same context as the owner's, with a `state`, an `index` and counts of their own.
+
+- **It runs whoever owns the name.** With an owner, with only a component of the host for it, or with neither. Which plugins are installed changes nothing for an observer.
+- **It changes no node.** Not the directive, not what is inside it, not anything else: a write to `attrs` or `type`, a structural method and `remove` throw a `TypeError` that names the observer, the directive and its owner. A deferred task an observer starts is held to the same. The owner decides what the directive is and how it renders, so what an observer finds goes into its plugin data, which a component reads through Svelte context.
+- **What it may do:** `ctx.set` and `ctx.add`, owned by the node whose handler runs and revoked with it, `ctx.warn`, `ctx.id`, `ctx.scratch`, `ctx.defer`, and the close callbacks it returns.
+- **After the owner.** At the open the global open handlers of the directive run first, then the owner's `parse`, then the observers in plugin order. At the close the observers' callbacks run last, after the owner's and the global ones. For a child the owner's `children` and `descendants` handlers run first, then the observers', and their close callbacks in the same order. An observer can change nothing the owner would see, so the only thing the order decides is what the observer sees, and this way it is the directive as the owner left it: the args it set at the open, the wrappers it made, the args it wrote at the close.
+- **As the directive streams.** `children` and `descendants` handlers of an observer run as each node opens, as the owner's do, so an observer sees the label of a container when it arrives and need not wait for the close.
+- **In the fused pass,** as bound handlers run, also for a plugin that is `sequential`.
+- **A plugin does not observe its own directive.** A plugin whose name owns a table entry for the name and observes it too throws a `TypeError`, its own handlers already see the directive.
+- **Revocation** is as for the owner: an inline directive whose bracket never closes takes what its observers wrote with it, and a directive inside a construct that goes, an emphasis that never closes or a link with no destination, stays with what they wrote.
+
+`mdsvex` reads `observe` from a parse plugin of `parse_plugins` and from the `parse` of a plugin bundle, which carries the bundle's name. The global directive handlers of either still never see a directive a component takes.
 
 ## Dirty Tracking
 

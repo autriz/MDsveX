@@ -23,7 +23,7 @@ import { v3ToVolarMappings } from "@mdsvex/source-map/v3-to-volar";
 
 const SVELTE_EXTENSION = ".svelte";
 
-import { SVELTE_SHIMS } from "./_svelte_shims";
+import { SVELTE_SHIMS } from "./_svelte_shims.js";
 
 /** Create a simple IScriptSnapshot from a string. */
 function createSnapshot(text: string): IScriptSnapshot {
@@ -49,7 +49,7 @@ function createSvelteVirtualCode(
 		return undefined;
 	}
 
-	const v3Map = tsx.map.toJSON ? tsx.map.toJSON() : tsx.map;
+	const v3Map = tsx.map;
 
 	// Prepend svelte2tsx shims so TypeScript can resolve helper types
 	const prefix = SVELTE_SHIMS ? SVELTE_SHIMS + "\n" : "";

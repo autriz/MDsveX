@@ -6,13 +6,18 @@ import {
 	merge_meta,
 	note_footnote,
 	string_to_kind,
-} from './utils';
-import { type UndoLog, ATTR_DID_NOT_EXIST } from './undo_log';
+} from './utils.js';
+import { buf_code } from './buf_utils.js';
+import { type UndoLog, ATTR_DID_NOT_EXIST } from './undo_log.js';
+import type { HeadingIds } from './heading_ids.js';
 
 /** the kind a plugin names, a footnote it makes is noted as the parser notes one */
 function kind_named(type: string): NodeKind | undefined {
 	const kind = string_to_kind(type);
-	if (kind !== undefined && kind >= NodeKind.footnote_reference)
+	if (
+		kind === NodeKind.footnote_reference ||
+		kind === NodeKind.footnote_definition
+	)
 		note_footnote();
 	return kind;
 }
@@ -248,6 +253,10 @@ export class ViewCache {
 	host: StructureHost | null;
 	/** @internal the document the views are made for, a view of an earlier one throws */
 	gen = 0;
+	/** @internal a heading whose close callbacks run before its id is made, NONE for none */
+	lazy = NONE;
+	/** @internal what makes the id of lazy */
+	headings: HeadingIds | null = null;
 
 	constructor(
 		buf: NodeBuffer,
@@ -302,6 +311,18 @@ export class ViewCache {
 		return new NodeView(index, this.buf, this.text_source, this, this.undo);
 	}
 
+	/** @internal the buffer the views read */
+	get buffer(): NodeBuffer {
+		return this.buf;
+	}
+
+	/** @internal a callback reads the attrs of the heading whose id waits, it is made first */
+	make_lazy(buf: NodeBuffer): void {
+		const index = this.lazy;
+		this.lazy = NONE;
+		this.headings!.close(buf, index);
+	}
+
 	/** discard all cached views. */
 	clear(): void {
 		this.first = null;
@@ -345,9 +366,18 @@ class AttrsTarget {
 	}
 }
 
+/** the metadata of the node, the id of a heading that waits for one is made first */
+function meta_of(target: AttrsTarget): any {
+	const buf = target[VIEW]._live();
+	const idx = target[IDX];
+	const cache = target[VIEW]._views();
+	if (idx === cache.lazy) cache.make_lazy(buf);
+	return buf.metadata_at(idx);
+}
+
 const ATTRS_HANDLER: ProxyHandler<AttrsTarget> = {
 	get(target, prop: string): any {
-		const meta = target[VIEW]._live().metadata_at(target[IDX]);
+		const meta = meta_of(target);
 		return meta ? meta[prop] : undefined;
 	},
 
@@ -388,17 +418,17 @@ const ATTRS_HANDLER: ProxyHandler<AttrsTarget> = {
 	},
 
 	has(target, prop: string): boolean {
-		const meta = target[VIEW]._live().metadata_at(target[IDX]);
+		const meta = meta_of(target);
 		return meta ? prop in meta : false;
 	},
 
 	ownKeys(target): string[] {
-		const meta = target[VIEW]._live().metadata_at(target[IDX]);
+		const meta = meta_of(target);
 		return meta ? Object.keys(meta) : [];
 	},
 
 	getOwnPropertyDescriptor(target, prop: string) {
-		const meta = target[VIEW]._live().metadata_at(target[IDX]);
+		const meta = meta_of(target);
 		if (meta && prop in meta) {
 			return {
 				configurable: true,
@@ -458,6 +488,11 @@ export class NodeView {
 	_live(): NodeBuffer {
 		if (this._gen !== this._cache.gen) throw new Error(STALE_VIEW);
 		return this._buf;
+	}
+
+	/** @internal the cache the view was made by */
+	_views(): ViewCache {
+		return this._cache;
 	}
 
 	/** @internal a write needs a handler that runs, a view without a dispatcher writes freely */
@@ -539,15 +574,8 @@ export class NodeView {
 			kind === NodeKind.code_fence ||
 			kind === NodeKind.code_span ||
 			kind === NodeKind.html_comment
-		) {
-			// read from the buffer, a source tree stores a string too when the text is not a source range
-			const s = buf._strings[idx];
-			if (s !== undefined) return s;
-			const vs = buf.value_start_at(idx);
-			const ve = buf.value_end_at(idx);
-			if (vs === NONE || ve === NONE || ve <= vs) return '';
-			return this._text_source.slice(vs, ve);
-		}
+		)
+			return buf_code(buf, idx, this._text_source);
 
 		// container node: walk children, concatenate
 		let result = '';

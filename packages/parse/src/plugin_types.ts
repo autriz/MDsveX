@@ -1,8 +1,8 @@
-import type { NodeView } from './node_view';
-import type { Json, PluginCache } from './plugin_data';
-import type { TextRun } from './text_run';
+import type { NodeView } from './node_view.js';
+import type { Json, PluginCache } from './plugin_data.js';
+import type { TextRun } from './text_run.js';
 
-export type { DataChange, Json } from './plugin_data';
+export type { DataChange, Json } from './plugin_data.js';
 
 /** a problem a plugin reported with ctx.warn */
 export interface PluginWarning {
@@ -66,6 +66,14 @@ export interface DocumentContext {
 	 */
 	readonly data: Readonly<Record<string, Json>>;
 	/**
+	 * what the plugin keeps for itself through the document, one object per
+	 * plugin name, the same from every handler, close callback, bound handler,
+	 * deferred task and the document hook, never published, a write is not
+	 * taken back when its node is revoked, so keep only what a revoke can not
+	 * make wrong, reading it throws for a plugin without a name
+	 */
+	readonly scratch: Record<string, any>;
+	/**
 	 * one value under a key, owned by the node whose handler or close callback
 	 * writes it and taken back when that node is revoked, of two owners the
 	 * later one in the document wins, the value is copied and frozen and one
@@ -79,6 +87,15 @@ export interface DocumentContext {
 	 * sequential pass come after the rest in the order they were added
 	 */
 	add(key: string, value: unknown): void;
+	/**
+	 * an id no element of the document has, base itself or the next free
+	 * repeat of it, base-1, base-2, set it on the node it is for, it is owned
+	 * by the node whose handler runs and free again when that node is revoked,
+	 * with heading_ids in mdsvex it shares one set of ids with the headings,
+	 * element headings and footnotes, fixed keeps base as it is, an id the
+	 * author wrote, and one a node before it was given is a HeadingIdError
+	 */
+	id(base: string, options?: { fixed?: boolean }): string;
 	/**
 	 * starts async work for the node whose handler or close callback runs,
 	 * the task gets a node and a context of its own and changes the document
@@ -113,6 +130,8 @@ export interface TaskContext {
 	readonly filename: string | undefined;
 	readonly frontmatter: Record<string, unknown> | undefined;
 	readonly data: Readonly<Record<string, Json>>;
+	/** the scratch of the plugin, a write lands at once, not with the other changes of the task */
+	readonly scratch: Record<string, any>;
 	set(key: string, value: unknown): void;
 	add(key: string, value: unknown): void;
 	/** a node to point at is the node of the task or one reached from it */
@@ -125,11 +144,9 @@ export interface TaskContext {
 
 /**
  * context passed to plugin handlers, new for each document and each plugin,
- * a plugin keeps what it needs between its handlers on it
+ * a plugin keeps what it needs between its handlers on ctx.scratch
  */
-export interface PluginContext extends DocumentContext {
-	[key: string]: any;
-}
+export type PluginContext = DocumentContext;
 
 /** a single handler entry for a node type. */
 export interface NodeHandler {
@@ -169,10 +186,17 @@ export interface ParsePlugin {
 	 * the text of an element that holds code, such as code or kbd
 	 */
 	all_text?: boolean;
+	/**
+	 * directives the plugin observes by name, whoever owns them, entries as
+	 * those of a table of bound handlers, they run in the fused pass after the
+	 * handlers of the owner and change no node, a write to one is a TypeError
+	 */
+	observe?: DirectiveHandlers;
 	[nodeType: string]:
 		| { parse: NodeHandler['parse'] }
 		| TextHandler
 		| ((root: NodeView, ctx: PluginContext) => void | Promise<void>)
+		| DirectiveHandlers
 		| boolean
 		| string
 		| undefined;

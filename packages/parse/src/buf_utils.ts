@@ -5,7 +5,7 @@
  * no cursor state, no allocations beyond the returned arrays.
  */
 
-import type { NodeBuffer } from './utils';
+import type { NodeBuffer } from './utils.js';
 
 const NONE = 0xffffffff;
 
@@ -53,7 +53,69 @@ export function buf_text_content(
 	return text;
 }
 
+/**
+ * the code of a fence or a code span, or the text of a comment, its own text
+ * and then the text of the nodes a plugin put in it, where a break is a line
+ * end, a comment adds nothing
+ *
+ * @example
+ * fence.append('text', 'let a = 1;'); // buf_code of the fence is 'let a = 1;'
+ */
+export function buf_code(
+	buf: NodeBuffer,
+	idx: number,
+	source: SourceSlice
+): string {
+	const own = own_text(buf, idx, source);
+	const first = buf.first_child_at(idx);
+	return first === NONE ? own : own + held_code(buf, idx, first, source);
+}
+
+/** what buf_code reads offsets of the source through, a string is one */
+export interface SourceSlice {
+	slice(start: number, end: number): string;
+}
+
+/** buf_text through a SourceSlice */
+function own_text(buf: NodeBuffer, idx: number, source: SourceSlice): string {
+	const s = buf._strings[idx];
+	if (s !== undefined) return s;
+	const vs = buf.value_start_at(idx);
+	const ve = buf.value_end_at(idx);
+	if (vs === NONE || ve === NONE || ve <= vs) return '';
+	return source.slice(vs, ve);
+}
+
+function held_code(
+	buf: NodeBuffer,
+	idx: number,
+	child: number,
+	source: SourceSlice
+): string {
+	let text = '';
+	while (child !== NONE && buf.parent_at(child) === idx) {
+		const kind = buf.kind_at(child) as number;
+		if (kind === LINE_BREAK || kind === HARD_BREAK || kind === SOFT_BREAK)
+			text += '\n';
+		else if (kind === TEXT || kind === CODE_SPAN || kind === CODE_FENCE)
+			text += buf_code(buf, child, source);
+		else if (kind !== HTML_COMMENT) {
+			const first = buf.first_child_at(child);
+			if (first !== NONE) text += held_code(buf, child, first, source);
+		}
+		child = buf.next_at(child);
+	}
+	return text;
+}
+
 // must follow NodeKind
+const TEXT = 1;
+const CODE_FENCE = 5;
+const LINE_BREAK = 6;
+const CODE_SPAN = 8;
+const HARD_BREAK = 17;
+const SOFT_BREAK = 18;
+const HTML_COMMENT = 26;
 const FOOTNOTE_REFERENCE = 36;
 const FOOTNOTE_DEFINITION = 37;
 
@@ -61,10 +123,14 @@ const FOOTNOTE_DEFINITION = 37;
 export interface FootnoteProblem {
 	/**
 	 * footnote_undefined is a reference with no definition, footnote_duplicate
-	 * a definition of a label that has one, footnote_unused a definition no
-	 * reference reaches
+	 * a definition of a label that has one, footnote_empty a definition with
+	 * nothing in it, footnote_unused a definition no reference reaches
 	 */
-	code: 'footnote_undefined' | 'footnote_duplicate' | 'footnote_unused';
+	code:
+		| 'footnote_undefined'
+		| 'footnote_duplicate'
+		| 'footnote_empty'
+		| 'footnote_unused';
 	label: string;
 	node: number;
 }
@@ -85,6 +151,11 @@ export interface FootnoteIndex {
 	references: Map<number, number>;
 	/** in document order, the references of the body before those inside definitions */
 	problems: FootnoteProblem[];
+	/**
+	 * the id each footnote id is given in its place, by that id, when a
+	 * heading was given it first, see HeadingIds, unset or null for none
+	 */
+	moved?: Map<string, string> | null;
 }
 
 /** the id of the definition of a footnote, by its label so a link to it survives a renumbering */
@@ -157,7 +228,8 @@ export function footnote_index(
 				if (down !== NONE) {
 					owners.push(owner);
 					owner = node;
-				}
+				} else if (!optimistic)
+					problems.push({ code: 'footnote_empty', label, node });
 			}
 		}
 		if (down !== NONE) {

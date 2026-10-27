@@ -192,12 +192,8 @@ function set_cites(node: NodeView, cites: Cited[], style: CitationStyle) {
 	};
 }
 
-/** the citations and lists of a document, in the order they are written */
-function find(
-	parent: NodeView,
-	citations: NodeView[],
-	lists: NodeView[]
-): void {
+/** the citations of a document, in the order they are written */
+function find(parent: NodeView, citations: NodeView[]): void {
 	for (let child = parent.first_child; child !== null; child = child.next) {
 		const type = child.type;
 		if (type === 'text') continue;
@@ -205,9 +201,7 @@ function find(
 			citations.push(child);
 			continue;
 		}
-		if (type === 'directive_leaf' && child.attrs.name === 'bibliography')
-			lists.push(child);
-		find(child, citations, lists);
+		find(child, citations);
 	}
 }
 
@@ -296,8 +290,14 @@ export function citations(options: CitationsOptions = {}): Bundle {
 						);
 						return;
 					}
-					// empty until the document hook, or the live data a streaming view passes
-					node.attrs.args = { ...node.attrs.args, data: '{}', style };
+					// in the order they are written, no block directive is revoked
+					const lists: NodeView[] = (ctx.scratch.lists ??= []);
+					// a second list reads nothing, the first reads the context until the document hook
+					node.attrs.args =
+						lists.length > 0
+							? { ...node.attrs.args, data: '{}', style }
+							: { ...node.attrs.args, style };
+					lists.push(node);
 				},
 			},
 		},
@@ -308,8 +308,8 @@ export function citations(options: CitationsOptions = {}): Bundle {
 				const cited = data.cited;
 				if (cited === undefined || cited.length === 0) return;
 				const citations: NodeView[] = [];
-				const lists: NodeView[] = [];
-				find(root, citations, lists);
+				find(root, citations);
+				const lists: NodeView[] = ctx.scratch.lists ?? [];
 				const entry = (key: string) => data[`entry:${key}`];
 				let n = 0;
 				for (const node of citations) {
@@ -325,11 +325,13 @@ export function citations(options: CitationsOptions = {}): Bundle {
 							'a document has one ::bibliography, this one lists nothing',
 							list
 						);
-						return;
 					}
+					// data ahead of style keeps the compiled args as they were
+					const { style: written, ...args } = list.attrs.args ?? {};
 					list.attrs.args = {
-						...list.attrs.args,
-						data: JSON.stringify(data),
+						...args,
+						data: i > 0 ? '{}' : JSON.stringify(data),
+						style: written ?? style,
 					};
 				});
 			},

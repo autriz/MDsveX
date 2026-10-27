@@ -14,6 +14,7 @@
 import { Cursor } from '@mdsvex/parse/cursor';
 import { is_raw_text_tag } from '@mdsvex/parse/utils';
 import {
+	buf_code,
 	footnote_id,
 	footnote_index,
 	footnote_ref_id,
@@ -25,8 +26,8 @@ import {
 	RecordMapping,
 	record_data,
 	record_mappings,
-} from './mappings';
-import type { Mapping, MappingData } from './mappings';
+} from './mappings.js';
+import type { Mapping, MappingData } from './mappings.js';
 import {
 	records_by_offset,
 	reserve_trace,
@@ -35,23 +36,24 @@ import {
 	trace_free_at,
 	trace_room,
 	trace_take,
-} from './sourcemap';
-import type { MapTrace, SourceMapV3 } from './sourcemap';
-import { ComponentScope, component_imports } from './scope';
-import type { ComponentImport, ReplaceWarning } from './scope';
-import { is_entity_name } from './entities';
+} from './sourcemap.js';
+import type { MapTrace, SourceMapV3 } from './sourcemap.js';
+import { ComponentScope, component_imports } from './scope.js';
+import type { ComponentImport, ReplaceWarning } from './scope.js';
+import { is_entity_name } from './entities.js';
+import { top_block } from './component.js';
 
-export type { Mapping, CodeInformation, MappingData } from './mappings';
-export { MapSink } from './mappings';
-export { ComponentScope, component_imports } from './scope';
+export type { Mapping, CodeInformation, MappingData } from './mappings.js';
+export { MapSink } from './mappings.js';
+export { ComponentScope, component_imports } from './scope.js';
 /** @internal a pass over the tree reads references as the renderer does */
-export { is_entity_name } from './entities';
+export { is_entity_name } from './entities.js';
 export type {
 	ComponentImport,
 	ComponentSource,
 	DefaultImport,
 	ReplaceWarning,
-} from './scope';
+} from './scope.js';
 
 /**
  * a fence the highlighter rendered, every string is markup svelte reads as
@@ -381,12 +383,23 @@ function escape_node_text(c: Cursor): string {
 
 function fence_text(c: Cursor): string {
 	if (fs !== null) return fence_text_from(c);
-	return c.text();
+	return held_text(c);
+}
+
+/** true for a fence, a code span or a comment a plugin put nodes in, their text is its text too */
+function holds(c: Cursor): boolean {
+	return c.words[c.index * W.stride + W.first_child] !== Slot.NONE;
+}
+
+/** c.text of a fence, a code span or a comment, and then the text of the nodes a plugin put in it */
+function held_text(c: Cursor): string {
+	return holds(c) ? buf_code(c.buffer, c.index, c.source) : c.text();
 }
 
 /** equals escape_code of fence_text */
 function escape_fence_text(c: Cursor): string {
 	if (fs !== null) return escape_code(fence_text_from(c));
+	if (holds(c)) return escape_code(buf_code(c.buffer, c.index, c.source));
 	// a fence in a block quote or a list item holds its code as a string, without what they put before its lines
 	const text = c.prebuilt;
 	return text === undefined ? escape_code_text(c) : escape_code(text);
@@ -395,6 +408,12 @@ function escape_fence_text(c: Cursor): string {
 /** equals escape_code of c.text, reading source slices through the escape index */
 function escape_code_text(c: Cursor): string {
 	return escape_text_at(c, c.index, c.value_start, c.value_end, true);
+}
+
+/** equals escape_code of the held_text of a code span */
+function escape_span_text(c: Cursor): string {
+	if (holds(c)) return escape_code(buf_code(c.buffer, c.index, c.source));
+	return escape_code_text(c);
 }
 
 /** m is the first of & < > " at or after vs */
@@ -615,6 +634,7 @@ const enum K {
 	DIRECTIVE_LABEL = 35,
 	FOOTNOTE_REFERENCE = 36,
 	FOOTNOTE_DEFINITION = 37,
+	DEFINITION = 38,
 }
 
 export const K_ROOT = K.ROOT;
@@ -710,7 +730,8 @@ function emit_record(
 
 /**
  * offsets in html characters, every span the render records covers at least
- * one chunk, so none is dropped for its width
+ * one chunk, so none is dropped for its width, a span with no end is a node
+ * a parse plugin added and gets no record
  */
 function put_record(
 	sink: MapSink,
@@ -721,7 +742,7 @@ function put_record(
 	node_index: number,
 	code: number
 ): void {
-	if (src_start !== Slot.NONE) {
+	if (src_start !== Slot.NONE && src_end !== Slot.NONE) {
 		let rec = sink.rec;
 		const p = sink.n;
 		if (p + Rec.SIZE > rec.length) rec = sink.grow();
@@ -796,6 +817,8 @@ function _spans_some(
 	const idx = c.index;
 	const s = c.start,
 		e = c.end;
+	// a node a parse plugin added has no end and no place in the source
+	if (e === Slot.NONE) return;
 	put_record(sink, pre, post, s, e, idx, preset << 2);
 	if (!sink.syntax) return;
 	const vs = c.value_start,
@@ -1401,6 +1424,90 @@ function content_record(
 	);
 }
 
+/**
+ * a content record per line of fence code the parser built, false for other code
+ * each such line is the end of its source line once indent and quote markers go
+ */
+function fence_lines(
+	c: Cursor,
+	sink: MapSink,
+	at: number,
+	text: string,
+	trace: boolean
+): boolean {
+	const code = c.prebuilt;
+	if (code === undefined || (fs !== null && fs.has(c.index)) || holds(c))
+		return false;
+	const src = c.source;
+	const ve = c.value_end;
+	let line = c.value_start;
+	let g = 0;
+	let r = 0;
+	for (;;) {
+		// escaping keeps the linefeeds, so the text and the code have the same lines
+		let g_end = string_index_of.call(text, '\n', g);
+		let r_end = string_index_of.call(code, '\n', r);
+		let s_end = string_index_of.call(src, '\n', line);
+		if (s_end === -1 || s_end > ve) s_end = ve;
+		const last = g_end === -1;
+		if (last) {
+			g_end = text.length;
+			r_end = code.length;
+		} else {
+			g_end++;
+			r_end++;
+		}
+		const s_to = last ? s_end : s_end + 1;
+		let s_from = s_to - (r_end - r);
+		// a tab the indent cut leaves spaces the source line has no room for
+		if (s_from < line) s_from = line;
+		if (g_end > g) {
+			if (trace) tr_run(sink, at + g, at + g_end, s_from, s_to);
+			else
+				put_record(
+					sink,
+					at + g,
+					at + g_end,
+					s_from,
+					s_to,
+					c.index,
+					Code.CODE_CONTENT
+				);
+		}
+		if (last) return true;
+		g = g_end;
+		r = r_end;
+		line = s_end + 1;
+	}
+}
+
+/** the escaped code of a fence and its content records, after flushing the register */
+function fence_content(
+	c: Cursor,
+	sink: MapSink,
+	p: number,
+	text: string,
+	trace: boolean
+): number {
+	if (p !== 0) mo += FOLD_STR[p];
+	const at = mo.length;
+	if (!fence_lines(c, sink, at, text, trace)) {
+		if (trace) tr_run(sink, at, at + text.length, c.value_start, c.value_end);
+		else
+			put_record(
+				sink,
+				at,
+				at + text.length,
+				c.value_start,
+				c.value_end,
+				c.index,
+				Code.CODE_CONTENT
+			);
+	}
+	mo += text;
+	return 0;
+}
+
 /** render a single node at the current cursor position. */
 function render_node(c: Cursor, sink?: MapSink): void {
 	// as number, or the case labels narrow c.kind for the reads inside a case
@@ -1473,7 +1580,7 @@ function render_node(c: Cursor, sink?: MapSink): void {
 			const pre = mo.length;
 			_open(c, '<code', '<code>', '>');
 			const ao = mo.length;
-			let code = escape_code_text(c);
+			let code = escape_span_text(c);
 			if (string_index_of.call(code, '\n') !== -1)
 				code = code.replace(/\n/g, ' ');
 			if (sink) content_record(sink, c, code, Code.CODE_CONTENT);
@@ -1502,7 +1609,8 @@ function render_node(c: Cursor, sink?: MapSink): void {
 			}
 			const ao = mo.length;
 			const text = escape_fence_text(c);
-			if (sink) content_record(sink, c, text, Code.CODE_CONTENT);
+			if (sink && !fence_lines(c, sink, mo.length, text, false))
+				content_record(sink, c, text, Code.CODE_CONTENT);
 			mo += text;
 			const bc = mo.length;
 			mo += '</code></pre>';
@@ -1589,7 +1697,7 @@ function render_node(c: Cursor, sink?: MapSink): void {
 			const pre = mo.length;
 			mo += '<hr />';
 			// node and open syntax, the close syntax span is empty
-			if (sink) {
+			if (sink && c.end !== Slot.NONE) {
 				const post = mo.length;
 				put_record(
 					sink,
@@ -1757,7 +1865,7 @@ function render_node(c: Cursor, sink?: MapSink): void {
 			const pre = mo.length;
 			mo += '<!--';
 			const ao = mo.length;
-			const text = c.text();
+			const text = held_text(c);
 			if (sink) content_record(sink, c, text, Code.TEXT_CONTENT);
 			mo += text;
 			const bc = mo.length;
@@ -1870,8 +1978,9 @@ function render_node(c: Cursor, sink?: MapSink): void {
 			break;
 
 		default:
-			// a label renders only as the snippet of a replaced directive, and a
-			// footnote definition in the section at the end
+			// a label renders only as the snippet of a replaced directive, a
+			// footnote definition in the section at the end and a link reference
+			// definition not at all
 			if (c.kind < K.DIRECTIVE_LABEL) render_children(c, sink);
 			else if (c.kind === K.FOOTNOTE_REFERENCE) {
 				const pre = mo.length;
@@ -2422,7 +2531,7 @@ function fold_node(c: Cursor, p: number): number {
 					return fold_hl(p, hl_span_head(c, h), h.body, hl_span_tail(h));
 			}
 			p = fold_open(c, p, S_CODE, S_CODE_OPEN, S_GT);
-			const code = escape_code_text(c);
+			const code = escape_span_text(c);
 			p = push_dyn(
 				p,
 				code.indexOf('\n') === -1 ? code : code.replace(/\n/g, ' ')
@@ -2456,7 +2565,7 @@ function fold_node(c: Cursor, p: number): number {
 
 		case K.HTML_COMMENT:
 			p = push_static(p, S_COMMENT_OPEN);
-			p = push_dyn(p, c.text());
+			p = push_dyn(p, held_text(c));
 			return push_static(p, S_COMMENT_CLOSE);
 
 		case K.MUSTACHE:
@@ -2494,8 +2603,9 @@ function fold_node(c: Cursor, p: number): number {
 			return push_dyn(p, module_script());
 
 		default:
-			// a label renders only as the snippet of a replaced directive, and a
-			// footnote definition in the section at the end
+			// a label renders only as the snippet of a replaced directive, a
+			// footnote definition in the section at the end and a link reference
+			// definition not at all
 			if (c.kind >= K.DIRECTIVE_LABEL)
 				return c.kind === K.FOOTNOTE_REFERENCE
 					? push_dyn(p, fn_reference(c))
@@ -2833,6 +2943,11 @@ function tr_point(sink: MapSink, gen: number, src: number): void {
 	}
 }
 
+/** the point of a node, a node a parse plugin added has no end and no point */
+function tr_at(sink: MapSink, gen: number, c: Cursor): void {
+	if (c.end !== Slot.NONE) tr_point(sink, gen, c.start);
+}
+
 /** a content span, a run when it copies the source, empty spans map nothing */
 function tr_run(
 	sink: MapSink,
@@ -3001,7 +3116,7 @@ function tr_node(c: Cursor, sink: MapSink, p: number): number {
 			p = tr_open(c, p, WRAP_HEAD[row], WRAP_FOLDED[row], WRAP_END[row]);
 			p = tr_children(c, sink, p);
 			p = tr_push(p, WRAP_CLOSE[row]);
-			tr_point(sink, pre, c.start);
+			tr_at(sink, pre, c);
 			return p;
 		}
 
@@ -3014,7 +3129,7 @@ function tr_node(c: Cursor, sink: MapSink, p: number): number {
 				p = tr_task(c, sink, p, meta.checked);
 			else p = tr_children(c, sink, p);
 			p = tr_push(p, S_LI_CLOSE);
-			tr_point(sink, pre, c.start);
+			tr_at(sink, pre, c);
 			return p;
 		}
 
@@ -3034,11 +3149,11 @@ function tr_node(c: Cursor, sink: MapSink, p: number): number {
 			}
 			const pre = mo.length + FOLD_LEN[p];
 			p = tr_open(c, p, S_CODE, S_CODE_OPEN, S_GT);
-			let code = escape_code_text(c);
+			let code = escape_span_text(c);
 			if (string_index_of.call(code, '\n') !== -1)
 				code = code.replace(/\n/g, ' ');
 			tr_text(c, sink, p, code);
-			tr_point(sink, pre, c.start);
+			tr_at(sink, pre, c);
 			return S_CODE_CLOSE;
 		}
 
@@ -3058,14 +3173,14 @@ function tr_node(c: Cursor, sink: MapSink, p: number): number {
 			}
 			p = tr_children(c, sink, p);
 			p = tr_push(p, ordered ? S_OL_CLOSE : S_UL_CLOSE);
-			tr_point(sink, pre, c.start);
+			tr_at(sink, pre, c);
 			return p;
 		}
 
 		case K.THEMATIC_BREAK: {
 			const pre = mo.length + FOLD_LEN[p];
 			p = tr_push(p, S_HR);
-			tr_point(sink, pre, c.start);
+			tr_at(sink, pre, c);
 			return p;
 		}
 
@@ -3080,7 +3195,7 @@ function tr_node(c: Cursor, sink: MapSink, p: number): number {
 			p = tr_open(c, p, S_TABLE, S_TABLE_OPEN, S_GT_LF);
 			p = tr_table_content(c, sink, p);
 			p = tr_push(p, S_TABLE_CLOSE);
-			tr_point(sink, pre, c.start);
+			tr_at(sink, pre, c);
 			return p;
 		}
 
@@ -3107,7 +3222,7 @@ function tr_node(c: Cursor, sink: MapSink, p: number): number {
 			mo = mo + s + _attrs(c, LINK_HANDLED);
 			p = tr_children(c, sink, S_GT);
 			p = tr_push(p, S_A_CLOSE);
-			tr_point(sink, pre, c.start);
+			tr_at(sink, pre, c);
 			return p;
 		}
 
@@ -3122,15 +3237,15 @@ function tr_node(c: Cursor, sink: MapSink, p: number): number {
 				s += ' title="' + escape_text_html(meta.title as string) + '"';
 			mo = mo + s + _attrs(c, IMAGE_HANDLED);
 			// the syntax spans are empty, only the node is recorded
-			tr_point(sink, pre, c.start);
+			tr_at(sink, pre, c);
 			return S_SELF_CLOSE;
 		}
 
 		case K.HTML_COMMENT: {
 			const pre = mo.length + FOLD_LEN[p];
 			p = tr_push(p, S_COMMENT_OPEN);
-			tr_text(c, sink, p, c.text());
-			tr_point(sink, pre, c.start);
+			tr_text(c, sink, p, held_text(c));
+			tr_at(sink, pre, c);
 			return S_COMMENT_CLOSE;
 		}
 
@@ -3138,7 +3253,7 @@ function tr_node(c: Cursor, sink: MapSink, p: number): number {
 			const pre = mo.length + FOLD_LEN[p];
 			p = tr_push(p, S_BRACE_OPEN);
 			tr_text(c, sink, p, c.text());
-			tr_point(sink, pre, c.start);
+			tr_at(sink, pre, c);
 			return S_BRACE_CLOSE;
 		}
 
@@ -3150,7 +3265,7 @@ function tr_node(c: Cursor, sink: MapSink, p: number): number {
 			const text = c.text();
 			mo = mo + '{@' + meta_str(tag);
 			if (text) tr_text(c, sink, S_SPACE, text);
-			tr_point(sink, pre, c.start);
+			tr_at(sink, pre, c);
 			return S_BRACE_CLOSE;
 		}
 
@@ -3163,8 +3278,9 @@ function tr_node(c: Cursor, sink: MapSink, p: number): number {
 			return 0;
 
 		default:
-			// a label renders only as the snippet of a replaced directive, and a
-			// footnote definition in the section at the end
+			// a label renders only as the snippet of a replaced directive, a
+			// footnote definition in the section at the end and a link reference
+			// definition not at all
 			if (c.kind >= K.DIRECTIVE_LABEL)
 				return c.kind === K.FOOTNOTE_REFERENCE
 					? fn_reference_mapped(c, sink, p, true)
@@ -3194,7 +3310,7 @@ function tr_task(c: Cursor, sink: MapSink, p: number, on: boolean): number {
 		p = tr_push(p, box);
 		p = tr_children(c, sink, p);
 		p = tr_push(p, S_P_CLOSE);
-		tr_point(sink, pre, c.start);
+		tr_at(sink, pre, c);
 	}
 	let next = n[para * W.stride + W.next];
 	while (next !== Slot.NONE && n[next * W.stride + W.parent] === item) {
@@ -3222,8 +3338,8 @@ function tr_code_fence(c: Cursor, sink: MapSink, p: number): number {
 	} else {
 		p = tr_open(c, p, S_PRE_CODE, S_PRE_CODE_OPEN, S_GT);
 	}
-	tr_text(c, sink, p, escape_fence_text(c));
-	tr_point(sink, pre, c.start);
+	fence_content(c, sink, p, escape_fence_text(c), true);
+	tr_at(sink, pre, c);
 	return S_PRE_CODE_CLOSE;
 }
 
@@ -3291,7 +3407,7 @@ function tr_html(c: Cursor, sink: MapSink, p: number): number {
 		if (q !== 0) mo += FOLD_STR[q];
 	}
 	mo = mo + '</' + meta_str(tag);
-	tr_point(sink, pre, c.start);
+	tr_at(sink, pre, c);
 	return S_GT;
 }
 
@@ -3336,7 +3452,7 @@ function tr_svelte_block(c: Cursor, sink: MapSink, p: number): number {
 	if (p !== 0) mo += FOLD_STR[p];
 	mo = mo + '{/' + block_tag;
 	// node span for the whole block, use the block node (goto_parent already called)
-	tr_point(sink, pre, c.start);
+	tr_at(sink, pre, c);
 	return S_BRACE_CLOSE;
 }
 
@@ -3542,7 +3658,7 @@ function mp_node(c: Cursor, sink: MapSink, p: number): number {
 			const pre = mo.length + FOLD_LEN[p];
 			p = tr_open(c, p, S_CODE, S_CODE_OPEN, S_GT);
 			const ao = mo.length + FOLD_LEN[p];
-			let code = escape_code_text(c);
+			let code = escape_span_text(c);
 			if (string_index_of.call(code, '\n') !== -1)
 				code = code.replace(/\n/g, ' ');
 			tr_content(c, sink, p, code, Code.CODE_CONTENT);
@@ -3587,7 +3703,7 @@ function mp_node(c: Cursor, sink: MapSink, p: number): number {
 				c.index,
 				Preset.STRUCTURE << 2
 			);
-			if (sink.syntax) {
+			if (sink.syntax && c.end !== Slot.NONE) {
 				const vs = c.value_start;
 				put_record(
 					sink,
@@ -3675,7 +3791,7 @@ function mp_node(c: Cursor, sink: MapSink, p: number): number {
 			const pre = mo.length + FOLD_LEN[p];
 			p = tr_push(p, S_COMMENT_OPEN);
 			const ao = mo.length + FOLD_LEN[p];
-			tr_content(c, sink, p, c.text(), Code.TEXT_CONTENT);
+			tr_content(c, sink, p, held_text(c), Code.TEXT_CONTENT);
 			const bc = mo.length;
 			_spans(sink, pre, ao, bc, bc + FOLD_LEN[S_COMMENT_CLOSE], c, Preset.TEXT);
 			return S_COMMENT_CLOSE;
@@ -3717,8 +3833,9 @@ function mp_node(c: Cursor, sink: MapSink, p: number): number {
 			return 0;
 
 		default:
-			// a label renders only as the snippet of a replaced directive, and a
-			// footnote definition in the section at the end
+			// a label renders only as the snippet of a replaced directive, a
+			// footnote definition in the section at the end and a link reference
+			// definition not at all
 			if (c.kind >= K.DIRECTIVE_LABEL)
 				return c.kind === K.FOOTNOTE_REFERENCE
 					? fn_reference_mapped(c, sink, p, false)
@@ -3779,7 +3896,7 @@ function mp_code_fence(c: Cursor, sink: MapSink, p: number): number {
 		p = tr_open(c, p, S_PRE_CODE, S_PRE_CODE_OPEN, S_GT);
 	}
 	const ao = mo.length + FOLD_LEN[p];
-	tr_content(c, sink, p, escape_fence_text(c), Code.CODE_CONTENT);
+	fence_content(c, sink, p, escape_fence_text(c), false);
 	const bc = mo.length;
 	_spans(sink, pre, ao, bc, bc + FOLD_LEN[S_PRE_CODE_CLOSE], c, Preset.CODE);
 	return S_PRE_CODE_CLOSE;
@@ -4344,7 +4461,7 @@ function cm_spans(
 	post: number,
 	preset: number
 ): void {
-	if (comp_mode === CM.TRACE) tr_point(sink!, pre, c.start);
+	if (comp_mode === CM.TRACE) tr_at(sink!, pre, c);
 	else if (comp_mode === CM.MAPPED) _spans(sink!, pre, ao, bc, post, c, preset);
 }
 
@@ -4355,11 +4472,11 @@ function cm_void(
 	pre: number,
 	preset: number
 ): void {
-	if (comp_mode === CM.TRACE) tr_point(sink!, pre, c.start);
+	if (comp_mode === CM.TRACE) tr_at(sink!, pre, c);
 	else if (comp_mode === CM.MAPPED) {
 		const post = mo.length;
 		put_record(sink!, pre, post, c.start, c.end, c.index, preset << 2);
-		if (preset === Preset.STRUCTURE && sink!.syntax) {
+		if (preset === Preset.STRUCTURE && sink!.syntax && c.end !== Slot.NONE) {
 			const vs = c.value_start;
 			put_record(
 				sink!,
@@ -4628,7 +4745,7 @@ function comp_node(
 			}
 			p = cm_put(p, open + _attrs(c) + '>');
 			const ao = mo.length;
-			let code = escape_code_text(c);
+			let code = escape_span_text(c);
 			if (string_index_of.call(code, '\n') !== -1)
 				code = code.replace(/\n/g, ' ');
 			p = cm_text(c, sink, p, code);
@@ -4665,7 +4782,11 @@ function comp_node(
 			if (fs !== null) open += fence_props(c);
 			p = cm_put(p, open + js_prop('code', fence_text(c)) + '><pre>' + inner);
 			const ao = mo.length;
-			p = cm_text(c, sink, p, escape_fence_text(c));
+			const text = escape_fence_text(c);
+			p =
+				comp_mode === CM.FOLD
+					? push_dyn(p, text)
+					: fence_content(c, sink!, p, text, comp_mode === CM.TRACE);
 			const bc = mo.length;
 			p = cm_put(p, '</code></pre>' + close);
 			cm_spans(c, sink, pre, ao, bc, mo.length, Preset.CODE);
@@ -5869,6 +5990,21 @@ export class CursorHTMLRenderer {
 		sink.release();
 	}
 
+	/**
+	 * the nodes changed after their block was rendered, as the node of a
+	 * deferred task that applied does, apply_ready gives them, each block that
+	 * holds one renders again at the next update, a renderer without a cache
+	 * renders every block anyway
+	 */
+	invalidate(buf: NodeBuffer, nodes: readonly number[]): void {
+		const closed = this.closed;
+		if (closed === null) return;
+		for (let i = 0; i < nodes.length; i++) {
+			const block = top_block(buf, nodes[i]);
+			if (block !== Slot.NONE) closed.delete(block);
+		}
+	}
+
 	reset(): void {
 		this.blocks.length = 0;
 		this.closed?.clear();
@@ -5999,7 +6135,7 @@ let fs: FenceSources | null = null;
 function fence_text_from(c: Cursor): string {
 	const from = fs!.get(c.index);
 	if (from !== undefined) return from.text;
-	return c.text();
+	return held_text(c);
 }
 
 /** fence_info of a render with fence sources */
@@ -6071,10 +6207,10 @@ function hl_block(
  */
 function hl_span(c: Cursor): HighlightedCode | null {
 	if (c.extra === 1)
-		return hl!.math === true ? hl!.inline_math!(c.text(), c.start) : null;
+		return hl!.math === true ? hl!.inline_math!(held_text(c), c.start) : null;
 	const lang = fence_info(c, c.meta());
 	if (!lang) return null;
-	let code = c.text();
+	let code = held_text(c);
 	if (string_index_of.call(code, '\n') !== -1) code = code.replace(/\n/g, ' ');
 	return hl!.inline(code, lang, c.start);
 }
@@ -6143,7 +6279,7 @@ function tr_hl(
 	if (live !== null) hl_live_trace(sink, c, mo.length, body, live);
 	else if (body.length !== 0) tr_point(sink, mo.length, c.value_start);
 	mo += body + tail;
-	tr_point(sink, pre, c.start);
+	tr_at(sink, pre, c);
 	return 0;
 }
 
@@ -7029,16 +7165,23 @@ function fn_href(id: string): string {
 	return escape_code(fn_fragment(id));
 }
 
+/** the id a footnote id is given, another when a heading was given it first */
+function fn_id(notes: FootnoteRender, id: string): string {
+	const moved = notes.moved;
+	return moved === undefined || moved === null ? id : (moved.get(id) ?? id);
+}
+
 /** the link a reference renders as, '' for one in a definition that is not rendered */
 function fn_reference(c: Cursor): string {
-	const at = fn_get(c).references.get(c.index);
+	const notes = fn_get(c);
+	const at = notes.references.get(c.index);
 	if (at === undefined) return '';
 	const number = Math.floor(at / 65536);
 	return (
 		'<sup><a href="#' +
-		fn_href(footnote_id(fn!.labels[number - 1])) +
+		fn_href(fn_id(notes, footnote_id(notes.labels[number - 1]))) +
 		'" id="' +
-		escape_code(footnote_ref_id(number, at % 65536)) +
+		escape_code(fn_id(notes, footnote_ref_id(number, at % 65536))) +
 		'" role="doc-noteref">' +
 		number +
 		'</a></sup>'
@@ -7056,7 +7199,7 @@ function fn_reference_mapped(
 	if (p !== 0) mo += FOLD_STR[p];
 	const pre = mo.length;
 	mo += s;
-	if (trace) tr_point(sink, pre, c.start);
+	if (trace) tr_at(sink, pre, c);
 	else put_record(sink, pre, mo.length, c.start, c.end, c.index, 0);
 	return 0;
 }
@@ -7077,7 +7220,7 @@ function fn_back(notes: FootnoteRender, number: number, count: number): string {
 		const name = nth === 1 ? '' + number : number + '-' + nth;
 		s +=
 			' <a href="#' +
-			fn_href(footnote_ref_id(number, nth)) +
+			fn_href(fn_id(notes, footnote_ref_id(number, nth))) +
 			'" role="doc-backlink" aria-label="' +
 			label.replace('&#123;n&#125;', name) +
 			// the selector keeps the arrow from being drawn as an emoji
@@ -7192,7 +7335,10 @@ function fn_section(
 		const node = definitions[i];
 		if (node === Slot.NONE) continue;
 		let item =
-			open + '<li id="' + escape_code(footnote_id(notes.labels[i])) + '"';
+			open +
+			'<li id="' +
+			escape_code(fn_id(notes, footnote_id(notes.labels[i]))) +
+			'"';
 		open = '';
 		// a reference with no definition took a number, so the list skips it
 		if (i + 1 !== next) item += ' value="' + (i + 1) + '"';
@@ -7248,8 +7394,8 @@ function fn_component(
 			' number={' +
 			number +
 			'}' +
-			js_prop('href', '#' + fn_fragment(footnote_id(label))) +
-			js_prop('id', footnote_ref_id(number, at % 65536)) +
+			js_prop('href', '#' + fn_fragment(fn_id(notes, footnote_id(label)))) +
+			js_prop('id', fn_id(notes, footnote_ref_id(number, at % 65536))) +
 			_attrs(c, FOOTNOTE_HANDLED) +
 			'>'
 	);

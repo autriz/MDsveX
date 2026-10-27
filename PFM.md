@@ -32,6 +32,8 @@ let x;
 
 -> one fence with the info `md` whose code is the lines ` ```js ` and `let x;`.
 
+The indent of an opening fence, past where its container's content starts, is not code. As in CommonMark, each line of its code loses up to as many columns of leading whitespace, a tab counting as the tab size, so a fence indented as a whole, at the top of a document or inside an HTML element, a Svelte block or a directive, holds the same code as it does unindented. A line indented less loses what it has.
+
 **Link references**, Shorthand references must be explicit. `[ref]` alone is ambiguous (is it a link or plain text?). Required form:
 
 ```markdown
@@ -59,7 +61,20 @@ A label is one or more characters, none of them whitespace, `[`, `]` or `^`. Lab
 
 A reference is one by its syntax alone. `[^label]` is a reference wherever it stands in text, whether or not a definition exists and whether it comes before or after it, which is where footnotes differ from link references. So `[^abc]` in prose is a reference too: a bracket that is not one is escaped, `\[^abc]`, or put in code. A reference is not read in the text of a directive or the alt of an image, and `[^1](url)` is a reference followed by `(url)`.
 
-A definition is a block. It needs text on its line (`[^a]:` alone is a reference and a colon), it ends a paragraph as a heading does, and it may sit in any container. It is a container itself, and continues as a list item does: a line indented by four spaces past where the definition starts belongs to it, and so does a blank line. The first line that is not blank and not indented ends it, unless it goes on with a paragraph, which may run over lines that are not indented. The line of the label may start any block.
+A definition is a block. It ends a paragraph as a heading does, and it may sit in any container. It is a container itself, and continues as a list item does: a line indented by four spaces past where the definition starts belongs to it, and so does a blank line. The first line that is not blank and not indented ends it, unless it goes on with a paragraph, which may run over lines that are not indented. The line of the label may start any block.
+
+Its text may also start on the next line, indented by the same four spaces, which is how Prettier formats a long one. The two are the same definition:
+
+```markdown
+[^1]: To add line breaks within a footnote,
+    add a second line.
+
+[^1]:
+    To add line breaks within a footnote,
+    add a second line.
+```
+
+A definition with no text, `[^1]:` with no indented line after it, is an error in mdsvex.
 
 ```markdown
 [^1]: The source.

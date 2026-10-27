@@ -1,8 +1,8 @@
 import type { Rollup } from 'vite';
-import type { TemplateEntry, TemplateOptions } from './compile';
-import { split_exports } from './component_registry';
-import { same_names } from './export_tracker';
-import type { ExportTracker, Warn } from './export_tracker';
+import type { TemplateEntry, TemplateOptions } from './compile.js';
+import { split_exports } from './component_registry.js';
+import { same_names } from './export_tracker.js';
+import type { ExportTracker, Warn } from './export_tracker.js';
 import {
 	TEMPLATE_DIRECTIVES_ID,
 	TEMPLATE_ID,
@@ -10,9 +10,10 @@ import {
 	importer_in,
 	shown,
 	spec_of,
-} from './ids';
-import type { MdsvexOptions, TemplateSpec } from './main';
-import type { ManifestTemplate } from './manifest';
+} from './ids.js';
+import type { MdsvexOptions, TemplateSpec } from './main.js';
+import type { ManifestTemplate } from './manifest.js';
+import { template_module } from './template_module.js';
 
 const has_own = Object.prototype.hasOwnProperty;
 
@@ -295,13 +296,7 @@ export function template_registry(
 			const extra = await ctx.resolve(m.extra.spec, importer_in(root), {
 				skipSelf: true,
 			});
-			const a = JSON.stringify(main!.id);
-			const b = JSON.stringify(extra!.id);
-			// a named export shadows the same name from export *
-			let code = `export * from ${a};\nexport { default } from ${a};\n`;
-			if (m.extra.names.length !== 0)
-				code += `export { ${m.extra.names.map(export_name).join(', ')} } from ${b};\n`;
-			return code;
+			return template_module(main!.id, extra!.id, m.extra.names);
 		},
 		/** scan a changed file again, true when its export set changed */
 		async rescan(
@@ -408,10 +403,4 @@ function without_default(names: string[]): string[] {
 	return names.includes('default')
 		? names.filter((n) => n !== 'default')
 		: names;
-}
-
-const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
-
-function export_name(name: string): string {
-	return IDENTIFIER.test(name) ? name : JSON.stringify(name);
 }

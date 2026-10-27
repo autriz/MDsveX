@@ -6,6 +6,11 @@ Each directory here is one npm package, `@mdsvex/plugin-<name>`, that exports a 
 | ------------------------------- | ------------------------------------ | ----------------------------------------------------------------------------------- |
 | `@mdsvex/plugin-steps`          | [`steps`](./steps)                   | numbered steps, one for each heading inside `:::steps`                              |
 | `@mdsvex/plugin-tabs`           | [`tabs`](./tabs)                     | tabs and code groups, one tab for each heading or fence inside `:::tabs`            |
+| `@mdsvex/plugin-elements`       | [`elements`](./elements)             | details, accordions, keys, ruby and badges, each a directive over an html element   |
+| `@mdsvex/plugin-embeds`         | [`embeds`](./embeds)                 | YouTube and Vimeo players named by their title                                      |
+| `@mdsvex/plugin-figures`        | [`figures`](./figures)               | `:::figure[Caption]` around an image or anything else, numbered when asked          |
+| `@mdsvex/plugin-code-blocks`    | [`code-blocks`](./code-blocks)       | a `pre` with a copy button, the title and the caption of the fence                  |
+| `@mdsvex/plugin-diagram`        | [`diagram`](./diagram)               | `mermaid` fences drawn by pele at build time or by mermaid in the browser           |
 | `@mdsvex/plugin-anchors`        | [`anchors`](./anchors)               | a link to itself on every heading that has an id                                    |
 | `@mdsvex/plugin-external-links` | [`external-links`](./external-links) | `rel` and `target` on every link that leaves the site                               |
 | `@mdsvex/plugin-toc`            | [`toc`](./toc)                       | the headings of a document as data, and a `::toc` that lists them                   |
@@ -13,6 +18,8 @@ Each directory here is one npm package, `@mdsvex/plugin-<name>`, that exports a 
 | `@mdsvex/plugin-emoji`          | [`emoji`](./emoji)                   | emoji shortcodes, `:tada:` becomes the emoji, with an optional label                |
 | `@mdsvex/plugin-references`     | [`references`](./references)         | links for `@user`, `#123`, `owner/repo#123`, commits and bare urls                  |
 | `@mdsvex/plugin-citations`      | [`citations`](./citations)           | `:cite[key]` from a CSL JSON bibliography, and a `::bibliography` that lists them   |
+| `@mdsvex/plugin-link-check`     | [`link-check`](./link-check)         | a warning at every link to an id or a document that is not there                    |
+| `@mdsvex/plugin-numbering`      | [`numbering`](./numbering)           | numbered figures, tables, equations and sections, and `:ref[fig:x]` references      |
 
 The other files in this directory are the audit of the remark and rehype plugins these replace. [`PLUGIN_AUDIT.md`](./PLUGIN_AUDIT.md) says, for each thing those plugins did, whether mdsvex has it and where.
 
@@ -64,14 +71,14 @@ npm login
 ```
 
 ```bash
-node scripts/setup-trusted-publishing.mjs --dry-run @mdsvex/plugin-steps @mdsvex/plugin-tabs @mdsvex/plugin-anchors @mdsvex/plugin-external-links @mdsvex/plugin-toc @mdsvex/plugin-page-data @mdsvex/plugin-emoji @mdsvex/plugin-references @mdsvex/plugin-citations
+node scripts/setup-trusted-publishing.mjs --dry-run @mdsvex/plugin-link-check @mdsvex/plugin-elements @mdsvex/plugin-embeds @mdsvex/plugin-figures @mdsvex/plugin-code-blocks @mdsvex/plugin-diagram @mdsvex/plugin-numbering
 ```
 
 ```bash
-node scripts/setup-trusted-publishing.mjs @mdsvex/plugin-steps @mdsvex/plugin-tabs @mdsvex/plugin-anchors @mdsvex/plugin-external-links @mdsvex/plugin-toc @mdsvex/plugin-page-data @mdsvex/plugin-emoji @mdsvex/plugin-references @mdsvex/plugin-citations
+node scripts/setup-trusted-publishing.mjs @mdsvex/plugin-link-check @mdsvex/plugin-elements @mdsvex/plugin-embeds @mdsvex/plugin-figures @mdsvex/plugin-code-blocks @mdsvex/plugin-diagram @mdsvex/plugin-numbering
 ```
 
-Those are all nine packages here, and none of them is on npm yet. Name only the new ones once these have had their first release.
+The other packages here are on npm since `0.1.0-next.0`, so the commands name only those that are not yet.
 
 The dry run lists what it would do. The real run publishes a `0.0.0` placeholder of each package that is not on npm, then registers `pngwn/MDsveX` with `release.yml` as its trusted publisher. Run it with `node`, not through `pnpm run`, so the 2FA prompt reaches the terminal. It finds packages with `pnpm -r ls`, which covers `plugins/*`, and skips private ones, so a new package must not be `private` and must have a version other than `0.0.0`.
 
