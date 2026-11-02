@@ -12,7 +12,13 @@
  */
 
 import { Cursor } from '@mdsvex/parse/cursor';
-import { is_raw_text_tag } from '@mdsvex/parse/utils';
+import {
+	is_raw_text_tag,
+	spans_have,
+	spans_text,
+	unread_spans,
+} from '@mdsvex/parse/utils';
+import type { AttrSpans } from '@mdsvex/parse/utils';
 import {
 	buf_code,
 	footnote_id,
@@ -130,8 +136,16 @@ export interface PreMeta {
 	pre_props(meta: string, start: number): string;
 }
 
-/** a string is escaped as a url of the source is, '' leaves the attribute out, an expression goes in braces */
-export type UrlSource = string | { type: 'expression'; value: string };
+/**
+ * a string is escaped as a url of the source is, '' leaves the attribute out,
+ * an expression goes in braces, a picture names an imagetools Picture, a
+ * markdown image renders it as a picture element and a replacement gets it
+ * as its src
+ */
+export type UrlSource =
+	| string
+	| { type: 'expression'; value: string }
+	| { type: 'picture'; value: string };
 
 /** what replaces the src of an image or the href of a link, url is never empty, null or undefined keeps it */
 export type UrlLookup = (
@@ -1156,11 +1170,13 @@ function module_begin(buf: NodeBuffer, code: string): void {
 		if ((n[b] & 0xff) === K.HTML) {
 			const slot = n[b + W.meta];
 			const meta = slot === 0 ? undefined : buf._meta[slot - 1];
-			const attrs = meta?.attributes as Record<string, unknown> | undefined;
+			const script =
+				meta !== undefined && meta.tag === 'script' && !meta.self_closing;
+			const attrs = script
+				? (meta.attributes as Record<string, unknown> | undefined)
+				: undefined;
 			if (
-				meta !== undefined &&
-				meta.tag === 'script' &&
-				!meta.self_closing &&
+				script &&
 				attrs !== undefined &&
 				attrs.src === undefined &&
 				(attrs.module !== undefined || attrs.context === 'module')
@@ -1648,12 +1664,11 @@ function render_node(c: Cursor, sink?: MapSink): void {
 		case K.IMAGE: {
 			const pre = mo.length;
 			const meta = c.meta();
-			let s = '<img';
-			if (meta?.src) s += url_attr(meta.src as string, true);
+			let s = img_head(meta?.src);
 			s += ' alt="' + escape_text_html(_children_raw(c)) + '"';
 			if (meta?.title)
 				s += ' title="' + escape_text_html(meta.title as string) + '"';
-			mo = mo + s + _attrs(c, IMAGE_HANDLED) + ' />';
+			mo = mo + s + _attrs(c, IMAGE_HANDLED) + FOLD_STR[img_close];
 			// the syntax spans are empty, only the node is recorded
 			if (sink) put_record(sink, pre, mo.length, c.start, c.end, c.index, 0);
 			break;
@@ -2182,6 +2197,7 @@ const S_IMG = fold_base('<img');
 const S_SRC = fold_base(' src="');
 const S_ALT = fold_base(' alt="');
 const S_SELF_CLOSE = fold_base(' />');
+const S_PICTURE_CLOSE = fold_base(' /></picture>');
 const S_OL_START = fold_base('<ol start="');
 const S_OL = fold_base('<ol');
 const S_OL_OPEN = fold_base('<ol>\n');
@@ -2684,8 +2700,14 @@ function fold_link(c: Cursor, p: number): number {
 
 function fold_image(c: Cursor, p: number): number {
 	const meta = c.meta();
-	p = push_static(p, S_IMG);
-	if (meta?.src) p = fold_url(p, meta.src as string, true);
+	let close = S_SELF_CLOSE;
+	if (ul === null) {
+		p = push_static(p, S_IMG);
+		if (meta?.src) p = fold_url(p, meta.src as string, true);
+	} else {
+		p = push_dyn(p, img_head(meta?.src));
+		close = img_close;
+	}
 	p = push_static(p, S_ALT);
 	p = push_dyn(p, escape_text_html(_children_raw(c)));
 	p = push_static(p, S_QUOTE);
@@ -2695,7 +2717,7 @@ function fold_image(c: Cursor, p: number): number {
 		p = push_static(p, S_QUOTE);
 	}
 	p = fold_attrs(meta, p, IMAGE_HANDLED);
-	return push_static(p, S_SELF_CLOSE);
+	return push_static(p, close);
 }
 
 function fold_list(c: Cursor, p: number): number {
@@ -2746,9 +2768,14 @@ function fold_html(c: Cursor, p: number): number {
 	const meta = c.meta();
 	const tag = meta?.tag as string;
 	if (is_embed_script(c, tag)) return push_dyn(p, embed_html(c));
-	const html_attrs = meta?.attributes as
-		| Record<string, string | boolean>
-		| undefined;
+	// an unread tag written as fold writes it is its own attribute text
+	const spans = c.synthetic ? undefined : unread_spans(meta);
+	const text =
+		spans !== undefined && spans.canonical ? spans_text(spans) : undefined;
+	const html_attrs =
+		text === undefined
+			? (meta?.attributes as Record<string, string | boolean> | undefined)
+			: undefined;
 
 	if (meta?.self_closing) {
 		// source passthrough as in _node, decided before any push because a
@@ -2758,13 +2785,15 @@ function fold_html(c: Cursor, p: number): number {
 		if (passthrough) return push_dyn(p, passthrough);
 		p = push_static(p, S_LT);
 		p = push_dyn(p, tag);
-		if (html_attrs) p = fold_html_attrs(html_attrs, !c.synthetic, p);
+		if (text !== undefined) p = push_dyn(p, text);
+		else if (html_attrs) p = fold_html_attrs(html_attrs, !c.synthetic, p);
 		return push_static(p, S_SELF_CLOSE);
 	}
 
 	p = push_static(p, S_LT);
 	p = push_dyn(p, tag);
-	if (html_attrs) {
+	if (text !== undefined) p = push_dyn(p, text);
+	else if (html_attrs) {
 		p = fold_html_attrs(html_attrs, !c.synthetic, p);
 		if (meta!.repeated !== undefined)
 			p = push_dyn(
@@ -3230,15 +3259,14 @@ function tr_node(c: Cursor, sink: MapSink, p: number): number {
 			const pre = mo.length + FOLD_LEN[p];
 			if (p !== 0) mo += FOLD_STR[p];
 			const meta = c.meta();
-			let s = '<img';
-			if (meta?.src) s += url_attr(meta.src as string, true);
+			let s = img_head(meta?.src);
 			s += ' alt="' + escape_text_html(_children_raw(c)) + '"';
 			if (meta?.title)
 				s += ' title="' + escape_text_html(meta.title as string) + '"';
 			mo = mo + s + _attrs(c, IMAGE_HANDLED);
 			// the syntax spans are empty, only the node is recorded
 			tr_at(sink, pre, c);
-			return S_SELF_CLOSE;
+			return img_close;
 		}
 
 		case K.HTML_COMMENT: {
@@ -3768,23 +3796,23 @@ function mp_node(c: Cursor, sink: MapSink, p: number): number {
 			const pre = mo.length + FOLD_LEN[p];
 			if (p !== 0) mo += FOLD_STR[p];
 			const meta = c.meta();
-			let s = '<img';
-			if (meta?.src) s += url_attr(meta.src as string, true);
+			let s = img_head(meta?.src);
 			s += ' alt="' + escape_text_html(_children_raw(c)) + '"';
 			if (meta?.title)
 				s += ' title="' + escape_text_html(meta.title as string) + '"';
 			mo = mo + s + _attrs(c, IMAGE_HANDLED);
+			const close = img_close;
 			// the syntax spans are empty, only the node is recorded
 			put_record(
 				sink,
 				pre,
-				mo.length + FOLD_LEN[S_SELF_CLOSE],
+				mo.length + FOLD_LEN[close],
 				c.start,
 				c.end,
 				c.index,
 				0
 			);
-			return S_SELF_CLOSE;
+			return close;
 		}
 
 		case K.HTML_COMMENT: {
@@ -4144,7 +4172,7 @@ function mp_table_cells_ext(
 /** flat so the caller never pays for a rope */
 function render_folded(c: Cursor): string {
 	fold_out = comp_prefix;
-	const p = fold_node(c, 0);
+	const p = ws_on ? ws_pass(c, undefined, 0, CM.FOLD, false) : fold_node(c, 0);
 	let html = fold_out;
 	fold_out = '';
 	if (p !== 0) html += FOLD_STR[p];
@@ -4574,15 +4602,25 @@ function open_tag_end(
 /** the per kind extras of a typed element, those the author wrote are kept */
 function typed_extras(
 	tag: string,
-	attrs: Record<string, unknown> | undefined
+	attrs: Record<string, unknown> | undefined,
+	spans: AttrSpans | undefined
 ): string {
 	if (tag.length === 2 && tag.charCodeAt(0) === 104) {
 		const d = tag.charCodeAt(1) - 48;
-		if (d >= 1 && d <= 6 && (attrs === undefined || !('level' in attrs)))
+		if (d >= 1 && d <= 6 && !writes(attrs, spans, 'level'))
 			return ' level={' + d + '}';
-	} else if (tag === 'ol' && (attrs === undefined || !('start' in attrs)))
+	} else if (tag === 'ol' && !writes(attrs, spans, 'start'))
 		return ' start={1}';
 	return '';
+}
+
+function writes(
+	attrs: Record<string, unknown> | undefined,
+	spans: AttrSpans | undefined,
+	name: string
+): boolean {
+	if (spans !== undefined) return spans_have(spans, name);
+	return attrs !== undefined && name in attrs;
 }
 
 /**
@@ -4796,9 +4834,18 @@ function comp_node(
 		case K.HTML: {
 			const meta = c.meta()!;
 			const tag = meta.tag as string;
-			const attrs = meta.attributes as Record<string, unknown> | undefined;
 			const typed = !c.synthetic;
-			const end = typed ? open_tag_end(c, tag, attrs) : -1;
+			// attributes nobody read spell the source, so they need no check
+			const spans = typed ? unread_spans(meta) : undefined;
+			const unread = spans !== undefined && spans.name_start === c.start + 1;
+			const attrs = unread
+				? undefined
+				: (meta.attributes as Record<string, unknown> | undefined);
+			let end = -1;
+			if (unread) {
+				end = spans!.open_end;
+				tag_attrs_end = spans!.attrs_end;
+			} else if (typed) end = open_tag_end(c, tag, attrs);
 			// a typed tag keeps its attributes as written, they map as identity
 			const from = c.start + 1 + tag.length;
 			const at = pre + open.length;
@@ -4814,7 +4861,7 @@ function comp_node(
 				if (meta.repeated !== undefined)
 					open += repeated_attrs(meta.repeated as [string, unknown][], typed);
 			}
-			if (typed) open += typed_extras(tag, attrs);
+			if (typed) open += typed_extras(tag, attrs, unread ? spans : undefined);
 			const shut = meta.self_closing ? ' />' : '>';
 			if (end !== -1)
 				cm_tag(
@@ -5496,7 +5543,9 @@ function walk_child(
 function wrap_root(c: Cursor, sink: MapSink | undefined, p: number): number {
 	p = wrap_pass(c, sink, p, true);
 	p = cm_wrap(p, wrap_open);
-	p = wrap_pass(c, sink, p, false);
+	p = ws_on
+		? ws_pass(c, sink, p, wrap_mode, true)
+		: wrap_pass(c, sink, p, false);
 	if (fn !== null) p = fn_section(c, sink, p, wrap_mode);
 	return cm_wrap(p, '</' + WRAP_LOCAL + '>');
 }
@@ -5607,6 +5656,11 @@ export class CursorHTMLRenderer {
 	 * references of a document as its labels are first met
 	 */
 	declare footnotes?: FootnoteRender;
+	/**
+	 * true wraps each run of two or more static root blocks in a display
+	 * contents div, the cached render of update ignores it
+	 */
+	declare wrap_static?: boolean;
 	/** the cached render met a footnote, so each update numbers them again */
 	private noted = false;
 
@@ -5665,6 +5719,7 @@ export class CursorHTMLRenderer {
 					);
 				if (extra) extra_begin(imports);
 				if (this.strict_directives) dir_strict = true;
+				if (this.wrap_static === true) ws_on = true;
 				hoist_begin(c, buf, extra);
 				if (code) module_begin_fold(buf, code);
 				prebuilt_begin(buf);
@@ -5680,6 +5735,7 @@ export class CursorHTMLRenderer {
 				esc_prebuilt = true;
 				esc_bits = null;
 				if (dir_strict) dir_strict = false;
+				if (ws_on) ws_on = false;
 				if (comp_scope !== null) comp_end();
 				if (extra) extra_end();
 				if (code) module_end();
@@ -5800,6 +5856,7 @@ export class CursorHTMLRenderer {
 				);
 			if (extra) extra_begin(imports);
 			if (this.strict_directives) dir_strict = true;
+			if (this.wrap_static === true) ws_on = true;
 			hoist_begin(c, buf, extra);
 			mo = comp_prefix;
 			if (code) {
@@ -5808,7 +5865,8 @@ export class CursorHTMLRenderer {
 				mo += module_script();
 			}
 			prebuilt_begin(buf);
-			if (trace) p = tr_node(c, sink, 0);
+			if (ws_on) p = ws_pass(c, sink, 0, trace ? CM.TRACE : CM.MAPPED, false);
+			else if (trace) p = tr_node(c, sink, 0);
 			else p = mp_node(c, sink, 0);
 			if (fn !== null) p = fn_section(c, sink, p, trace ? CM.TRACE : CM.MAPPED);
 		} finally {
@@ -5821,6 +5879,7 @@ export class CursorHTMLRenderer {
 			esc_prebuilt = true;
 			esc_bits = null;
 			if (dir_strict) dir_strict = false;
+			if (ws_on) ws_on = false;
 			if (comp_scope !== null) comp_end();
 			if (extra) extra_end();
 			if (code) module_end();
@@ -5859,6 +5918,7 @@ export class CursorHTMLRenderer {
 				comp_last = comp_begin(c, scope, directives, mode, this.replace_typed);
 			if (extra) extra_begin(imports);
 			if (this.strict_directives) dir_strict = true;
+			if (this.wrap_static === true) ws_on = true;
 			wrap_begin(this.template!, mode);
 			wrap_hoist_begin(c, buf);
 			if (code) {
@@ -5891,6 +5951,7 @@ export class CursorHTMLRenderer {
 			esc_prebuilt = true;
 			esc_bits = null;
 			if (dir_strict) dir_strict = false;
+			if (ws_on) ws_on = false;
 			if (comp_scope !== null) comp_end();
 			if (extra) extra_end();
 			wrap_end();
@@ -6034,6 +6095,7 @@ export class CursorHTMLRenderer {
 		if (this.smart_punctuation !== undefined)
 			this.smart_punctuation = undefined;
 		if (this.footnotes !== undefined) this.footnotes = undefined;
+		if (this.wrap_static !== undefined) this.wrap_static = undefined;
 		this.noted = false;
 		// the escape index is module state and would keep the source alive,
 		// every render resets it, a zero length clamps any text of '' to empty
@@ -6120,12 +6182,49 @@ function fold_url(p: number, url: string, image: boolean): number {
 
 /** url_attr of a render with a lookup */
 function url_swap(url: string, image: boolean): string {
-	const name = image ? ' src=' : ' href=';
-	let to = ul!(url, image);
+	return url_value(image ? ' src=' : ' href=', url, ul!(url, image));
+}
+
+/** the attribute for what the lookup gave, a picture is the src of a replacement */
+function url_value(
+	name: string,
+	url: string,
+	to: UrlSource | null | undefined
+): string {
 	if (to == null) to = url;
 	if (typeof to !== 'string') return name + '{' + to.value + '}';
 	// an empty url of the source has no attribute either
 	return to === '' ? '' : name + '"' + escape_text_html(to) + '"';
+}
+
+/** the static that closes what img_head opened last */
+let img_close = S_SELF_CLOSE;
+
+/**
+ * a markdown image up to its alt, the img and its src, or for a picture the
+ * markup enhanced-img gives an image it imports, one source per format and
+ * the img with the fallback and its size
+ */
+function img_head(src: unknown): string {
+	img_close = S_SELF_CLOSE;
+	if (!src) return '<img';
+	if (ul === null) return '<img src="' + escape_text_html(src as string) + '"';
+	const to = ul(src as string, true);
+	if (to == null || typeof to === 'string' || to.type !== 'picture')
+		return '<img' + url_value(' src=', src as string, to);
+	img_close = S_PICTURE_CLOSE;
+	const v = to.value;
+	return (
+		'<picture>{#each Object.entries(' +
+		v +
+		".sources) as [format, srcset]}<source {srcset} type={'image/' + format} />{/each}<img src={" +
+		v +
+		'.img.src} width={' +
+		v +
+		'.img.w} height={' +
+		v +
+		'.img.h}'
+	);
 }
 
 /** the fences of the render in progress that take their code from elsewhere, null reads every one from the source */
@@ -7425,4 +7524,176 @@ function fn_section_folded(c: Cursor): string {
 	fold_out = '';
 	if (p !== 0) html += FOLD_STR[p];
 	return html;
+}
+
+//  static runs
+
+// hydration steps over the siblings before each node svelte owns one at a
+// time, a run of blocks in one wrapper is one step
+
+/** set while a render wraps runs of static blocks, only the root walks read it */
+let ws_on = false;
+
+const WS_OPEN = '<div style="display: contents">';
+const WS_CLOSE = '</div>';
+
+/**
+ * the root children as wrap_pass walks them, each block renders into an
+ * output of its own and its records move when it joins its run and when the
+ * run joins the document, so the html is never cut and a record moves twice
+ * at most
+ */
+function ws_pass(
+	c: Cursor,
+	sink: MapSink | undefined,
+	p: number,
+	mode: number,
+	skip_hoisted: boolean
+): number {
+	const fold = mode === CM.FOLD;
+	const stride = mode === CM.TRACE ? Trace.SIZE : Rec.SIZE;
+	let doc = fold ? fold_out : mo;
+	if (p !== 0) doc += FOLD_STR[p];
+	// the static blocks not yet in doc, their records count from the start of run
+	let run = '';
+	let count = 0;
+	let run_rec = 0;
+	const n = c.words;
+	let child = n[W.first_child];
+	while (child !== Slot.NONE) {
+		const b = child * W.stride;
+		if (n[b + W.parent] !== 0) break;
+		const k = n[b] & 0xff;
+		if (k !== K.LINE_BREAK) {
+			c.move_to(child);
+			if (!skip_hoisted || !wrap_hoists(c, k)) {
+				const rec = sink === undefined ? 0 : sink.n;
+				if (fold) fold_out = '';
+				else mo = '';
+				p = walk_child(c, sink, 0, mode, child, k);
+				let out = fold ? fold_out : mo;
+				if (p !== 0) out += FOLD_STR[p];
+				if (out.length === 0 && count === 0) {
+					// renders nothing outside a run, an import or a definition
+					ws_shift(sink, rec, stride, doc.length);
+				} else if (out.length === 0 || ws_static(out)) {
+					// a block that renders nothing inside a run neither ends it nor counts
+					if (count === 0) run_rec = rec;
+					ws_shift(sink, rec, stride, run.length);
+					if (out.length !== 0) {
+						run += out;
+						count++;
+					}
+				} else {
+					doc = ws_join(doc, run, count, sink, run_rec, rec, stride);
+					run = '';
+					count = 0;
+					ws_shift(sink, rec, stride, doc.length);
+					doc += out;
+				}
+			}
+		}
+		child = n[b + W.next];
+	}
+	const end = sink === undefined ? 0 : sink.n;
+	doc = ws_join(doc, run, count, sink, run_rec, end, stride);
+	if (fold) fold_out = doc;
+	else mo = doc;
+	c.move_to(0);
+	return 0;
+}
+
+/** doc and the run after it, inside a wrapper when the run holds two blocks or more */
+function ws_join(
+	doc: string,
+	run: string,
+	count: number,
+	sink: MapSink | undefined,
+	from: number,
+	to: number,
+	stride: number
+): string {
+	if (count === 0) return doc;
+	if (count === 1) {
+		ws_move(sink, from, to, stride, doc.length);
+		return doc + run;
+	}
+	ws_move(sink, from, to, stride, doc.length + WS_OPEN.length);
+	return doc + WS_OPEN + run + WS_CLOSE;
+}
+
+function ws_shift(
+	sink: MapSink | undefined,
+	from: number,
+	stride: number,
+	by: number
+): void {
+	if (sink !== undefined) ws_move(sink, from, sink.n, stride, by);
+}
+
+function ws_move(
+	sink: MapSink | undefined,
+	from: number,
+	to: number,
+	stride: number,
+	by: number
+): void {
+	if (sink === undefined || by === 0) return;
+	// grow keeps every index, so the records sit where they were written
+	const rec = sink.rec;
+	for (let i = from; i < to; i += stride) rec[i] += by;
+}
+
+/**
+ * true when the markup holds nothing svelte finds while hydrating, a block
+ * it wrongly takes is still correct inside a wrapper
+ */
+function ws_static(s: string): boolean {
+	const len = s.length;
+	// the next brace from i, found again only once the scan passes it
+	let brace = s.indexOf('{');
+	let i = 0;
+	for (;;) {
+		const lt = s.indexOf('<', i);
+		// a brace in text is an expression or a block
+		if (brace !== -1 && (lt === -1 || brace < lt)) return false;
+		if (lt === -1) return true;
+		let ch = s.charCodeAt(lt + 1);
+		if (ch === 33) {
+			// a comment, svelte drops it, braces and all
+			const e = s.indexOf('-->', lt + 4);
+			if (e === -1) return false;
+			i = e + 3;
+			if (brace !== -1 && brace < i) brace = s.indexOf('{', i);
+			continue;
+		}
+		let j = lt + 1;
+		if (ch === 47) {
+			// an end tag, its name was read at the start tag
+			i = lt + 2;
+			continue;
+		}
+		// a capital, a dot or a colon in the name is a component or a svelte element
+		for (; j < len; j++) {
+			ch = s.charCodeAt(j);
+			if ((ch >= 65 && ch <= 90) || ch === 46 || ch === 58) return false;
+			if (!((ch >= 97 && ch <= 122) || (ch >= 48 && ch <= 57) || ch === 45))
+				break;
+		}
+		if (j === lt + 1) return false;
+		const name = s.slice(lt + 1, j);
+		if (name === 'script' || name === 'style' || name === 'slot') return false;
+		// the attributes, a colon outside a value is a directive, a brace anywhere an expression
+		let quote = 0;
+		for (; j < len; j++) {
+			ch = s.charCodeAt(j);
+			if (ch === 123) return false;
+			if (quote !== 0) {
+				if (ch === quote) quote = 0;
+			} else if (ch === 34 || ch === 39) quote = ch;
+			else if (ch === 58) return false;
+			else if (ch === 62) break;
+		}
+		i = j;
+	}
 }

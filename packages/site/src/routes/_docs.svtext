@@ -447,7 +447,7 @@ interface MdsvexOptions {
 	math?: MathOptions | MathRenderer | false;
 	footnotes?: { label?: string; back_label?: string; strict?: boolean };
 	unwrap_images?: boolean;
-	import_images?: boolean;
+	import_images?: boolean | { enhanced?: boolean };
 	links?: {
 		routes?: string;
 		base?: true | string | { import: string; from: string };
@@ -587,6 +587,7 @@ export function steps() {
 | `directives` | one entry per directive name the plugin owns |
 | `parse` | a [parse plugin](docs#parse_plugins) for the whole document, the same object an entry of `parse_plugins` is |
 | `components` | element replacements, as `{ specifier, names }` |
+| `fences` | the fence languages the plugin renders itself, such as `['mermaid']`, which the highlighter never sees |
 
 An entry of `directives` can hold handlers. They are bound to that directive, so they never run anywhere else in the document:
 
@@ -662,6 +663,34 @@ export function numbering() {
 - **It changes no node.** It writes data, warns, and reads the tree. Writing to a node, the directive or anything else, throws a `TypeError` that names the plugin that owns the directive.
 - **It runs after the owner,** at the open and at the close, so it sees the args and the children as the owner left them.
 - **It runs whoever renders the directive:** a plugin, your own component, or nothing yet.
+
+A plugin that renders the fences of a language itself claims them with `fences`. `@mdsvex/plugin-diagram` draws each `mermaid` fence and keeps its code as the diagram's source:
+
+```js
+export function diagram() {
+	return {
+		name: 'diagram',
+		module: '@acme/diagram/directives',
+		directives: { diagram: {} },
+		fences: ['mermaid'],
+		parse: {
+			code_fence: {
+				parse(node) {
+					if (fence_meta(node.info).lang !== 'mermaid') return;
+					node.wrap_from('directive_container', { name: 'diagram' }).close();
+				}
+			}
+		}
+	};
+}
+```
+
+- **The highlighter never sees a claimed fence.** It renders as plain code, as with `highlight: false`, and there is no `unknown_language` warning for it. That holds for twinkleplop and for a highlighter function, and saves the work of highlighting code the plugin replaces. It still goes to a replaced `pre`, with its `lang`, `title` and the rest.
+- **A language has one owner.** Two plugins that claim the same language throw a `FenceOwnerError` when the config loads, with `language` and both plugin names as `plugins`.
+- **Only fences.** A code span with a hint, `` `#!mermaid A --> B` ``, is highlighted as before.
+- **The language as written**, the first word of the info string, so `Mermaid` is not `mermaid`. Claim what your handler matches.
+- **`math` fences** are rendered by the [`math`](docs#math) option before any highlighter, so claiming `math` changes nothing while it is on.
+- **The editor knows.** The manifest lists the claimed languages, so the language server does not warn of them either.
 
 `compile()` takes `plugins` as well. It writes `module` as the import specifier exactly as given.
 
@@ -1030,7 +1059,7 @@ Several images in one paragraph are all unwrapped, on one line or on lines of th
 ### `import_images`
 
 ```ts
-import_images: boolean = true;
+import_images: boolean | { enhanced?: boolean } = true;
 ```
 
 A markdown image with a relative url is imported, and the image gets what the import gives. Vite then hashes the file, inlines a small one, and fails the build when the file is missing.
@@ -1063,7 +1092,7 @@ The path is relative to the document, as it is on GitHub and in an editor previe
 
 A file used twice is imported once. An alias has to start with `$`, `#`, `@` or `~`. Any other bare path is a file beside the document, so `images/chart.png` is `./images/chart.png` even when `images` is an alias in your Vite config.
 
-A query reaches Vite, so `![A chart](./chart.png?url)` and `?inline` work as they do in any import. With a query that makes the import something other than a url, such as `?enhanced` from `@sveltejs/enhanced-img`, an `img` [replacement](docs#custom-components) decides what to do with the value. It gets the imported value as its `src` prop.
+A query reaches Vite, so `![A chart](./chart.png?url)` and `?inline` work as they do in any import. With a query that makes the import something other than a url, such as `?w=400` from an imagetools plugin, an `img` [replacement](docs#custom-components) decides what to do with the value. It gets the imported value as its `src` prop.
 
 A file in `static` or `public` is served from the root, so write it as `/chart.png`. Only markdown images are imported. An `<img src="./chart.png">` you type as HTML, a link to an image, and a url in frontmatter stay as written.
 
@@ -1073,7 +1102,56 @@ Set `import_images: false` to leave every url as written:
 mdsvex({ import_images: false });
 ```
 
-`compile()` takes the option too. It is off there by default, because the import only means something to a bundler that takes image files. The editor reads the option from the manifest the plugin writes, or from `import_images` in an `mdsvex.config.json`, where it is on unless it is `false`. A replaced `img` then gets the type of the import as its `src`, as TypeScript resolves it: `vite/client` declares the common image types and `?url`, `?raw` and `?inline`, and `@sveltejs/enhanced-img` declares `?enhanced`. An import TypeScript can't resolve reports nothing, and its `src` is `any`.
+#### Optimised images
+
+With [`@sveltejs/enhanced-img`][enhanced-img] in your Vite plugins, markdown images are optimised with nothing more to write. mdsvex sees `enhancedImages()` and imports every image it can optimise (avif, gif, heif, jpeg, jpg, png, tiff and webp) with `?enhanced`:
+
+```js
+// vite.config.js
+import { enhancedImages } from '@sveltejs/enhanced-img';
+import { sveltekit } from '@sveltejs/kit/vite';
+import { mdsvex } from 'mdsvex';
+
+export default {
+	plugins: [mdsvex(), enhancedImages(), sveltekit()],
+};
+```
+
+The image renders as the `<picture>` enhanced-img gives an `<enhanced:img>`: a `<source>` for each format it made, avif, webp and the format of the file, then an `<img>` with the `width` and `height` of the file, so the page doesn't shift as it loads. The `alt` and `title` stay on the `<img>`.
+
+```svx
+![A chart](./chart.png)
+```
+
+```svelte
+<script>
+	import __mdsvex_img_0 from './chart.png?enhanced';
+</script>
+
+<p>
+	<picture>
+		{#each Object.entries(__mdsvex_img_0.sources) as [format, srcset]}
+			<source {srcset} type={'image/' + format} />
+		{/each}
+		<img src={__mdsvex_img_0.img.src} width={__mdsvex_img_0.img.w} height={__mdsvex_img_0.img.h} alt="A chart" />
+	</picture>
+</p>
+```
+
+Some things change when you turn it on:
+
+- The `<img>` sits inside a `<picture>`, so a selector such as `p > img` no longer matches it. Write `p img` or `picture img`.
+- The first build is slower, as sharp makes every format and size of every image. imagetools keeps them in `node_modules/.cache/imagetools` for later builds.
+- An `img` [replacement](docs#custom-components) gets the imported picture as its `src` prop, `{ sources, img: { src, w, h } }`, and renders it as it likes. That is where `loading="lazy"` or `decoding="async"` go. mdsvex doesn't add them, nor does enhanced-img.
+- An `.svg`, and any image with a query of its own, such as `?url` or `?w=400`, is imported as written. A query is how you take one image out.
+
+Set `enhanced: false` to keep plain imports with enhanced-img installed, or `enhanced: true` to make a build fail when `enhancedImages()` is missing:
+
+```js
+mdsvex({ import_images: { enhanced: false } });
+```
+
+`compile()` takes the option too. It is off there by default, because the import only means something to a bundler that takes image files, and `{ enhanced: true }` turns the pictures on, as compile can't see your Vite plugins. The editor reads the option from the manifest the plugin writes, or from `import_images` in an `mdsvex.config.json`, where it is on unless it is `false`, and `{ "enhanced": true }` says enhanced-img is in the plugins. A replaced `img` then gets the type of the import as its `src`, as TypeScript resolves it: `vite/client` declares the common image types and `?url`, `?raw` and `?inline`, and `@sveltejs/enhanced-img` declares `?enhanced` as its `Picture`. An import TypeScript can't resolve reports nothing, and its `src` is `any`.
 
 ### `links`
 
@@ -1894,7 +1972,7 @@ mdsvex({
 | --- | --- |
 | [`@mdsvex/plugin-steps`](docs#steps) | numbered steps, one for each heading inside `:::steps` |
 | [`@mdsvex/plugin-tabs`](docs#tabs) | tabs and code groups, one tab for each heading or code fence inside `:::tabs` |
-| [`@mdsvex/plugin-elements`](docs#elements) | details, accordions, keys, ruby and badges, each a directive over an HTML element |
+| [`@mdsvex/plugin-elements`](docs#elements) | details, accordions, keys, ruby, badges, marks, insertions and abbreviations, each a directive over an HTML element |
 | [`@mdsvex/plugin-embeds`](docs#embeds) | YouTube and Vimeo players named by their title |
 | [`@mdsvex/plugin-code-blocks`](docs#code-blocks) | a `pre` with a copy button, the title and the caption of the fence |
 | [`@mdsvex/plugin-diagram`](docs#diagrams) | `mermaid` fences drawn by pele at build time or by mermaid in the browser |
@@ -2116,6 +2194,9 @@ Directives over plain HTML elements. A document imports only the ones it uses, n
 | `:kbd[Ctrl]` | a `<kbd>` |
 | `:ruby[漢字](rt=かんじ)` | a `<ruby>` with the reading in `<rt>` and `<rp>` fallbacks |
 | `:badge[new](tone=tip)` | a `<span class="badge">`, tinted by `note`, `tip`, `warning` or `danger` |
+| `:mark[text]` | a `<mark>` |
+| `:ins[text](datetime=2026-10-28)` | an `<ins>`, with the `datetime` and `cite` of the element |
+| `:abbr[HTML](title="HyperText Markup Language")` | an `<abbr>` with what it stands for in `title` |
 
 An accordion splits like [tabs](docs#tabs): the first heading written directly inside sets the depth, and each heading of that depth starts an item whose summary is the text of the heading, so it gets no id and no place in a table of contents. `(name=faq)` gives every item the `name` of a `<details>`, so opening one closes the others. A `:::details` written directly inside is an item too.
 
@@ -2133,11 +2214,11 @@ Every part of it.
 :::
 ````
 
-A `<details>` is a disclosure the browser already makes accessible, a button in the tab order that announces whether it is expanded.
+A `<details>` is a disclosure the browser already makes accessible, a button in the tab order that announces whether it is expanded. Most screen readers say nothing of a `<mark>` or an `<ins>`, so the text has to carry what matters, and a `title` is read by only some, so spell an abbreviation out in the text where the reader needs it.
 
-The build warns, with the line, about an accordion with no items (`no_items`), content before its first item (`content_before_first_item`), an empty heading in one (`item_without_label`) and a `:ruby` with no `rt` (`ruby_without_rt`).
+The build warns, with the line, about an accordion with no items (`no_items`), content before its first item (`content_before_first_item`), an empty heading in one (`item_without_label`), a `:ruby` with no `rt` (`ruby_without_rt`) and an `:abbr` with no `title` (`abbr_without_title`). A title with a space or a comma needs quotes.
 
-The stylesheet has selectors with no specificity and reads `--elements-line`, `--elements-radius` and `--elements-padding` from `.details` and `.accordion`, `--kbd-line` from `.kbd` and `--badge-color` from `.badge`. `elements({ css: false })` leaves it out and keeps the markup. To change the markup, export a component under the name of the directive from a [directives module](docs#declaring-directives). It gets the args as string props, and `label` and `children`. The plugin's own are exported as `@mdsvex/plugin-elements/Details.svelte` and so on.
+The stylesheet has selectors with no specificity and reads `--elements-line`, `--elements-radius` and `--elements-padding` from `.details` and `.accordion`, `--kbd-line` from `.kbd`, `--badge-color` from `.badge` and `--mark-color` from `.mark`, a tint behind text that keeps its colour. `elements({ css: false })` leaves it out and keeps the markup. To change the markup, export a component under the name of the directive from a [directives module](docs#declaring-directives). It gets the args as string props, and `label` and `children`. The plugin's own are exported as `@mdsvex/plugin-elements/Details.svelte` and so on.
 
 ### Embeds
 
@@ -2209,7 +2290,7 @@ Each `mermaid` fence is drawn as a diagram, by [pele](https://pele.run) or by [m
 
 **With mermaid** the server renders the code and the browser loads mermaid on a page that has a diagram and draws it in place of the code. Without JavaScript the reader sees the code.
 
-The plugin wraps each `mermaid` fence in a `diagram` directive, so the code still renders through whatever replaces `pre`, as the source in a closed "Diagram source" disclosure under the drawing. The `title` and `caption` of the fence go around the diagram, and `accTitle:` and `accDescr:` name it for screen readers. The highlighter has no mermaid grammar, so the build warns once per file that the code renders plain.
+The plugin wraps each `mermaid` fence in a `diagram` directive, so the code still renders through whatever replaces `pre`, as the source in a closed "Diagram source" disclosure under the drawing. The `title` and `caption` of the fence go around the diagram, and `accTitle:` and `accDescr:` name it for screen readers. The plugin [claims](docs#plugins) the `mermaid` language, so the highlighter never sees these fences, the code renders plain and nothing warns.
 
 ### Anchors
 
@@ -2905,7 +2986,7 @@ interface HighlightOptions {
 
 - `languages` adds languages and aliases, merged over the bundled ones. See [languages](docs#languages).
 - `default_language` highlights fences that name no language.
-- `on_unknown_language` decides what happens to a language mdsvex doesn't have. `'plain'`, the default, renders it as plain code and warns once per file and language. `'throw'` fails the build.
+- `on_unknown_language` decides what happens to a language mdsvex doesn't have. `'plain'`, the default, renders it as plain code and warns once per file and language. `'throw'` fails the build. A language a plugin [claims](docs#plugins), such as `mermaid` with `@mdsvex/plugin-diagram`, is never looked up, so it neither warns nor throws.
 - `line_numbers` numbers every fence's lines, `{ start: 10 }` from 10. A fence's own meta overrides it.
 - `annotations` lists the [code directives](docs#code-directives). Leave it out for the defaults, or pass `false` for none.
 - `render` is twinkleplop's render options under every fence's own, such as `indent_guides`, `whitespace` or the `line` and `token` hooks. See [twinkleplop's render options](https://twinkleplop.pngwn.at/docs/render_options).
@@ -3163,6 +3244,7 @@ type Highlighter = (
 
 - `lang` is the fence's language, `""` when it names none, and `meta` the rest of the info string.
 - `inline` is `true` for a [code span with ` #! `](docs#inline-code). Plain code spans never reach the highlighter.
+- A fence in a language a plugin [claims](docs#plugins) never reaches it either, the plugin renders that fence.
 - It returns a whole `<pre>` for a fence, or a `<code>` for inline code. `null` or `undefined` renders that code plain.
 - It must be synchronous. Do any async setup before `mdsvex()` is called, with top-level `await` in your Vite config.
 - It returns ordinary HTML. Don't escape it for Svelte, with `escapeSvelte` or anything else, and don't wrap it in `{@html}`. mdsvex escapes every brace in what you return, so a `{@html …}` wrapper would show up as text.
@@ -4166,12 +4248,13 @@ mdsvex 0.x ran remark and rehype, and took their plugins in `remarkPlugins` and 
 | `rehype-class-names`, `rehype-add-classes` | a parse plugin | `{ table: { parse(node) { node.attrs.class = 'table'; } } }` in [`parse_plugins`](docs#parse_plugins) |
 | `remark-sectionize`, `rehype-section` | a parse plugin | the `sections` plugin under [plugin handlers](docs#plugin-handlers) |
 | `rehype-figure`, `remark-figure-caption` | [`@mdsvex/plugin-figures`](docs#figures) | `:::figure[Caption]` around an image or anything else, with the caption in a `<figcaption>`. A lone image stays an image |
-| `rehype-img-size`, `rehype-plugin-image-native-lazy-loading` | a component | an `img` replacement sets `loading="lazy"`. For sizes, import the image with `?enhanced` from [`@sveltejs/enhanced-img`][enhanced-img], the replacement gets the imported value as `src` |
+| `rehype-img-size`, `rehype-plugin-image-native-lazy-loading` | [`@sveltejs/enhanced-img`][enhanced-img] and a component | add `enhancedImages()` to your Vite plugins and every markdown image gets its `width` and `height`, with avif and webp sources, see [optimised images](docs#optimised-images). For `loading="lazy"`, an `img` replacement sets it, and gets the picture as `src` |
 | `rehype-mermaid`, `remark-mermaidjs` | [`@mdsvex/plugin-diagram`](docs#diagrams) | `diagram()` draws each `mermaid` fence, at build time with `pele` installed or in the browser with `mermaid` |
 | `remark-embedder`, `remark-oembed`, `remark-youtube` | [`@mdsvex/plugin-embeds`](docs#embeds) | `::youtube[A talk](id=dQw4w9WgXcQ)` and `::vimeo`. Any other site is a leaf directive with a component of your own, see [directives](docs#the-three-forms) |
-| `remark-abbr` | a component | an inline directive, `:abbr[HTML](title=HyperText)` |
 | `remark-collapse` | nothing needed | `<details>` and `<summary>` work as typed, with markdown inside, and [`@mdsvex/plugin-elements`](docs#elements) adds `:::details[Summary]` and accordions |
 | `remark-kbd`, `remark-ruby` | [`@mdsvex/plugin-elements`](docs#elements) | `:kbd[Ctrl]` and `:ruby[漢字](rt=かんじ)` |
+| `remark-flexible-markers`, `remark-mark-highlight`, `remark-ins` | [`@mdsvex/plugin-elements`](docs#elements) | `:mark[text]` and `:ins[text]`. `==mark==` and `++ins++` are text, a plugin can't add syntax |
+| `remark-abbr` | [`@mdsvex/plugin-elements`](docs#elements) | `:abbr[HTML](title="HyperText Markup Language")` |
 | `rehype-meta`, `rehype-document` | a template | a [template](docs#templates-1) renders `<svelte:head>` from its props |
 | `rehype-video` | a component | an `a` or `img` replacement that renders a `<video>` for a video url |
 
@@ -4182,7 +4265,6 @@ mdsvex 0.x ran remark and rehype, and took their plugins in `remarkPlugins` and 
 | `remark-github-blockquote-alert`, `remark-github-alerts`, `rehype-callouts` | `> [!NOTE]` is a block quote that starts with `[!NOTE]`. Write `:::note` with a directive component |
 | `remark-heading-id`, `remark-attr`, `rehype-attr` | `{#id}` and `{.class}` can't exist, braces belong to Svelte. `heading_ids` makes ids, and a parse plugin can set any attribute |
 | `remark-definition-list`, `remark-deflist` | type `<dl>`, `<dt>` and `<dd>` |
-| `remark-flexible-markers`, `remark-ins` | `==mark==` and `++ins++` are text, type `<mark>` and `<ins>` |
 | `remark-wiki-link` | `[[Page]]` is text |
 | `remark-validate-links`, `remark-lint` | nothing checks links or style. A missing image fails the build when it is [imported](docs#import_images) |
 | `rehype-sanitize` | nothing, and none is planned. A document compiles to a component and runs as code, so don't compile markdown you don't trust |
@@ -4396,7 +4478,7 @@ A fence can be indented, inside an element or not. Its code keeps the indent it 
 ### Not read yet
 
 - **Bare urls.** Only `<https://example.com>` is a link, unless [`@mdsvex/plugin-references`](docs#references) is set to link them.
-- **GitHub alerts, definition lists, `==mark==` and wiki links**, see [nothing yet](docs#nothing-yet).
+- **GitHub alerts, definition lists and wiki links**, see [nothing yet](docs#nothing-yet). `==mark==` is text too, write [`:mark[text]`](docs#elements).
 
 ### Not possible yet
 
