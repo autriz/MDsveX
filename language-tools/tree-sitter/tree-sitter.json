@@ -2,9 +2,9 @@
 	"$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/config.schema.json",
 	"grammars": [
 		{
-			"name": "mdsvex",
-			"camelcase": "Mdsvex",
-			"title": "mdsvex",
+			"name": "pfm",
+			"camelcase": "Pfm",
+			"title": "pfm",
 			"scope": "text.html.pfm",
 			"file-types": ["svx", "pfm"],
 			"injection-regex": "^(mdsvex|svx|pfm)$",
@@ -16,7 +16,7 @@
 	"metadata": {
 		"version": "0.0.0",
 		"license": "MIT",
-		"description": "Tree-sitter grammar for mdsvex (Penguin-Flavoured Markdown)",
+		"description": "Tree-sitter grammar for PFM (Penguin-Flavoured Markdown)",
 		"authors": [
 			{
 				"name": "pngwn",
