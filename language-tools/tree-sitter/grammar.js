@@ -18,7 +18,7 @@ const LIST_KINDS = ['minus', 'plus', 'star', 'dot', 'parenthesis'];
 const tag_body = ($) => repeat(choice($._tag_whitespace, $.attribute));
 
 module.exports = grammar({
-	name: 'pfm',
+	name: 'mdsvex',
 
 	// container prefixes are read at the start of every line, wherever the parse is
 	extras: ($) => [$.block_continuation, $._indent],
