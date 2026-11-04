@@ -11,6 +11,7 @@ node_modules
 dist
 language-tools/typescript-plugin/lib/
 language-tools/vscode-pfm/server/
+language-tools/zed-pfm/target
 
 # logs
 logs
